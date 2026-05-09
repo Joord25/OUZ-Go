@@ -39,22 +39,23 @@ export default function PoseDemo() {
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
   const [cameraPosition, setCameraPosition] = useState<CameraPosition>('back');
 
-  // Native frame 좌표를 화면 좌표로 변환.
-  // landmark x,y 는 frameWidth × frameHeight 기준 픽셀.
-  // OuzPoseView 가 .resizeAspectFill 로 화면을 채우므로
-  // 단순 비율 변환 (근사) — 정확한 정렬은 Phase 0c 튜닝.
+  // .resizeAspectFill: scale = max → frame 이 view 보다 커지며 가운데 crop.
+  // landmark 는 frame 좌표 (회전된 portrait 기준, native 가 rotatedW/H 로 보냄).
   const transformLandmark = (
     lm: PoseLandmark,
     frameW: number,
     frameH: number,
   ) => {
-    if (frameW === 0 || frameH === 0) return { x: 0, y: 0 };
-    // frame 은 가로 wider (1280x720), 화면은 세로. 회전 보정.
-    // back camera + .right orientation = ML Kit 가 회전된 frame 기준 좌표 반환.
-    // 일단 단순 정규화 후 화면 비율 곱.
+    if (frameW === 0 || frameH === 0 || viewSize.width === 0)
+      return { x: 0, y: 0 };
+    const scale = Math.max(viewSize.width / frameW, viewSize.height / frameH);
+    const displayedW = frameW * scale;
+    const displayedH = frameH * scale;
+    const offsetX = (viewSize.width - displayedW) / 2;
+    const offsetY = (viewSize.height - displayedH) / 2;
     return {
-      x: (lm.x / frameW) * viewSize.width,
-      y: (lm.y / frameH) * viewSize.height,
+      x: lm.x * scale + offsetX,
+      y: lm.y * scale + offsetY,
     };
   };
 
