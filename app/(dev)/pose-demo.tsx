@@ -113,6 +113,10 @@ export default function PoseDemo() {
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [endReason, setEndReason] = useState<'out' | null>(null);
   const [missStreak, setMissStreak] = useState(0);
+  // 놓침 경고 배너 (시각). key 증가시키면 자동 hide 타이머 재시작.
+  const [missWarning, setMissWarning] = useState<{ visible: boolean; key: number }>(
+    { visible: false, key: 0 },
+  );
   // 음성 announce 시 stale closure 회피용.
   const squatCountRef = useRef(0);
   useEffect(() => {
@@ -311,12 +315,8 @@ export default function PoseDemo() {
             setSessionState('complete');
             clearInterval(interval);
           } else {
-            Speech.stop();
-            Speech.speak('놓침', {
-              language: 'ko-KR',
-              pitch: 1.0,
-              rate: 1.3,
-            });
+            // 1, 2번째 놓침: 음성 안내 X (cadence 방해 방지) → 시각 배너만.
+            setMissWarning((prev) => ({ visible: true, key: prev.key + 1 }));
             cycleStartCount = squatCountRef.current;
             beat = 'down';
           }
@@ -442,6 +442,15 @@ export default function PoseDemo() {
   }, [isTPose, distanceStatus, mode, sessionState, startSession]);
 
   // 30초 시간 제한 제거 — 신호음에 맞춰 무한 (3연속 탈락까지 진행).
+
+  // 놓침 경고 배너 자동 hide (1.5초).
+  useEffect(() => {
+    if (!missWarning.visible) return;
+    const t = setTimeout(() => {
+      setMissWarning((prev) => (prev.key === missWarning.key ? { ...prev, visible: false } : prev));
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [missWarning.key, missWarning.visible]);
 
 
   const distanceStatus: DistanceStatus =
@@ -617,6 +626,13 @@ export default function PoseDemo() {
              squatState === 'UP' ? '서있음 (UP)' :
              '앉음 (DOWN)'}
           </Text>
+        </View>
+      )}
+
+      {/* 놓침 경고 배너 (1.5초 자동 hide) */}
+      {mode === 'squat' && sessionState === 'active' && missWarning.visible && (
+        <View style={styles.missWarningBanner} pointerEvents="none">
+          <Text style={styles.missWarningText}>⚠ 박자에 맞춰 움직이세요</Text>
         </View>
       )}
 
@@ -887,6 +903,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     marginTop: 4,
+  },
+  missWarningBanner: {
+    position: 'absolute',
+    top: 120,
+    left: 16,
+    right: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(220, 53, 69, 0.95)',
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  missWarningText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
   },
   // idle 안내 (T자세 트리거 대기)
   idleOverlay: {
