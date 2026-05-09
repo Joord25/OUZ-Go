@@ -254,7 +254,7 @@ export default function PoseDemo() {
       setSquatState('WAITING');
       setThresholdY(null);
       setSessionState('idle');
-      setRemainingSec(0);
+      setMissStreak(0);
       setTPoseHoldProgress(0);
       tPoseStartRef.current = null;
       lastVoicedDistanceOkRef.current = null;
