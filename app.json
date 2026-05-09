@@ -10,11 +10,13 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.joord.ouzgo",
       "infoPlist": {
         "NSCameraUsageDescription": "OUZ-Go가 운동 자세를 분석하기 위해 카메라 사용을 요청합니다."
       }
     },
     "android": {
+      "package": "com.joord.ouzgo",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
