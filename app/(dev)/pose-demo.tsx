@@ -183,9 +183,10 @@ export default function PoseDemo() {
     });
   }, [squatGeometry, squatState, mode]);
 
-  // 스쿼트 state machine.
+  // 스쿼트 state machine. 거리 적절 (distanceStatus === 'ok') 일 때만 작동.
   useEffect(() => {
     if (mode !== 'squat' || !squatGeometry || thresholdY === null) return;
+    if (distanceStatus !== 'ok') return; // 멀거나 가까우면 카운트 X
 
     // hip y < threshold → 서있음 (UP). hip 이 화면 위쪽 (작은 y) 일수록 서있음.
     const isAboveThreshold = squatGeometry.hipY < thresholdY;
@@ -206,7 +207,7 @@ export default function PoseDemo() {
       }
       return prev;
     });
-  }, [squatGeometry, thresholdY, mode]);
+  }, [squatGeometry, thresholdY, mode, distanceStatus]);
 
   // 모드 변경 시 카운트 + threshold 리셋.
   useEffect(() => {
@@ -383,10 +384,12 @@ export default function PoseDemo() {
           <Text
             style={[
               styles.squatState,
-              squatState === 'DOWN' && styles.squatStateDown,
+              squatState === 'DOWN' && distanceStatus === 'ok' && styles.squatStateDown,
+              distanceStatus !== 'ok' && styles.squatStateGated,
             ]}
           >
-            {squatState === 'WAITING' ? '시작 자세 대기' :
+            {distanceStatus !== 'ok' ? '거리 조정 필요 ⚠' :
+             squatState === 'WAITING' ? '시작 자세 대기' :
              squatState === 'UP' ? '서있음 (UP)' :
              '앉음 (DOWN)'}
           </Text>
@@ -592,5 +595,8 @@ const styles = StyleSheet.create({
   },
   squatStateDown: {
     color: '#00FF88',
+  },
+  squatStateGated: {
+    color: '#FF6464',
   },
 });
