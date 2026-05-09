@@ -192,18 +192,19 @@ export default function PoseDemo() {
   }, [pose, isPersonDetected]);
 
   // 임계 y 설정 — (hip+knee) / 2 중간점.
-  // - 처음 인식 시: 즉시 설정
-  // - UP 상태: EMA 로 천천히 적응 (사용자 거리 변화 흡수)
-  // - DOWN 상태: 잠금 (squat 중에 임계가 따라 내려가지 않게)
+  // - WAITING: 즉시 추적 (사용자 자세 변동 그대로 반영, 첫 squat 전이라 lock 불필요)
+  // - UP: 천천히 EMA (squat 사이 거리 변화 흡수, 떨림 차단)
+  // - DOWN: 잠금 (squat 중 임계가 따라 내려가면 카운트 안 됨)
   useEffect(() => {
     if (mode !== 'squat' || !squatGeometry) return;
     setThresholdY((prev) => {
       const currentMid = (squatGeometry.hipY + squatGeometry.kneeY) / 2;
-      if (prev === null) return currentMid; // 첫 frame
+      if (prev === null) return currentMid;
+      if (squatState === 'WAITING') return currentMid;
       if (squatState === 'UP') {
         return THRESHOLD_EMA_ALPHA * currentMid + (1 - THRESHOLD_EMA_ALPHA) * prev;
       }
-      return prev; // DOWN / WAITING 중에는 잠금
+      return prev; // DOWN: 잠금
     });
   }, [squatGeometry, squatState, mode]);
 
@@ -312,6 +313,7 @@ export default function PoseDemo() {
     Speech.stop();
     setSquatCount(0);
     setSquatState('WAITING');
+    setThresholdY(null); // 새 세션마다 임계 리셋 → countdown 동안 다시 캘리브레이션
     downEnteredAtRef.current = 0;
     setRemainingSec(PRE_COUNTDOWN_SEC);
     setSessionState('countdown');
@@ -640,6 +642,9 @@ export default function PoseDemo() {
               setSessionState('idle');
               setEndReason(null);
               setSquatCount(0);
+              setSquatState('WAITING');
+              setThresholdY(null);
+              downEnteredAtRef.current = 0;
               lastVoicedDistanceOkRef.current = null;
               speakMessage('양팔을 벌려 티 자세로 대기해주세요');
             }}
