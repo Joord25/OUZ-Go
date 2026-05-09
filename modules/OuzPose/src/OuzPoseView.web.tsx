@@ -1,8 +1,8 @@
 import * as React from 'react';
 
-import { MyModuleViewProps } from './MyModule.types';
+import { OuzPoseViewProps } from './OuzPose.types';
 
-export default function MyModuleView(props: MyModuleViewProps) {
+export default function OuzPoseView(props: OuzPoseViewProps) {
   return (
     <div>
       <iframe

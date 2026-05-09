@@ -4,7 +4,7 @@ export type OnLoadEventPayload = {
   url: string;
 };
 
-export type MyModuleEvents = {
+export type OuzPoseEvents = {
   onChange: (params: ChangeEventPayload) => void;
 };
 
@@ -12,7 +12,7 @@ export type ChangeEventPayload = {
   value: string;
 };
 
-export type MyModuleViewProps = {
+export type OuzPoseViewProps = {
   url: string;
   onLoad: (event: { nativeEvent: OnLoadEventPayload }) => void;
   style?: StyleProp<ViewStyle>;

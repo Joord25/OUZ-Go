@@ -1,12 +1,12 @@
 import { registerWebModule, NativeModule } from 'expo';
 
-import { ChangeEventPayload } from './MyModule.types';
+import { ChangeEventPayload } from './OuzPose.types';
 
-type MyModuleEvents = {
+type OuzPoseEvents = {
   onChange: (params: ChangeEventPayload) => void;
 }
 
-class MyModule extends NativeModule<MyModuleEvents> {
+class OuzPose extends NativeModule<OuzPoseEvents> {
   PI = Math.PI;
   async setValueAsync(value: string): Promise<void> {
     this.emit('onChange', { value });
@@ -16,4 +16,4 @@ class MyModule extends NativeModule<MyModuleEvents> {
   }
 };
 
-export default registerWebModule(MyModule, 'MyModule');
+export default registerWebModule(OuzPose, 'OuzPose');

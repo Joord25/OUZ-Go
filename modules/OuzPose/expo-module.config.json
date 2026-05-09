@@ -1,9 +1,9 @@
 {
   "platforms": ["apple", "android", "web"],
   "apple": {
-    "modules": ["MyModule"]
+    "modules": ["OuzPose"]
   },
   "android": {
-    "modules": ["expo.modules.mymodule.MyModule"]
+    "modules": ["expo.modules.ouzpose.OuzPose"]
   }
 }
