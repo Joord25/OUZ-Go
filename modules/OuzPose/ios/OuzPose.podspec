@@ -6,7 +6,7 @@ Pod::Spec.new do |s|
   s.author         = ''
   s.homepage       = 'https://github.com/Joord25/OUZ-Go'
   s.platforms      = {
-    :ios => '15.5'
+    :ios => '15.1'
   }
   s.source         = { git: '' }
   s.static_framework = true
