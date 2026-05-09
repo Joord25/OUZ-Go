@@ -1,5 +1,5 @@
 import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { OuzPoseView } from '../../modules/OuzPose';
 import type {
@@ -8,10 +8,10 @@ import type {
   PoseLandmark,
 } from '../../modules/OuzPose/src/OuzPose.types';
 
-// Phase 0c: 거리 가이드 바 추가 (PRD 6-3).
-//  - 양 손목 (15, 16) 사이 거리 / frame width = 거리 비율
-//  - 0.40~0.85 = 적절 / 그 외 = 멀다 or 가깝다
-//  - 참조 MissionFit 패턴: 상단 가로 막대 + 좌우 멀다/가깝다 라벨 + 적정 시 녹색
+// Phase 0c: 거리 가이드 바 (PRD 6-3) + 안정화 v2.
+//  - 측정: 양 어깨 (11, 12) x 거리 / frame width  ← 손목보다 안정적
+//  - 스무딩: EMA (alpha=0.15) — 떨림 둔화
+//  - 사람 인식 체크: 어깨 + 엉덩이 likelihood ≥ 0.5 → 스켈레톤 표시
 
 const CONNECTIONS: [number, number][] = [
   [11, 12],
@@ -25,9 +25,16 @@ const CONNECTIONS: [number, number][] = [
   [28, 30], [30, 32], [28, 32],
 ];
 
-// 거리 비율 임계값.
-const DIST_FAR_THRESHOLD = 0.4;   // 미만 = 멀다
-const DIST_NEAR_THRESHOLD = 0.6;  // 초과 = 가깝다
+// 거리 비율 임계값 (어깨 기준 — 손목보다 작아짐).
+const DIST_FAR_THRESHOLD = 0.15;  // 미만 = 멀다
+const DIST_NEAR_THRESHOLD = 0.32; // 초과 = 가깝다
+
+// EMA 스무딩 — 새 값 비중. 작을수록 둔감 (안정).
+const SMOOTHING_ALPHA = 0.15;
+
+// 사람 인식 체크에 쓰는 핵심 keypoint (어깨 + 엉덩이).
+const CORE_BODY_INDICES = [11, 12, 23, 24];
+const CORE_LIKELIHOOD_THRESHOLD = 0.5;
 
 type DistanceStatus = 'no_pose' | 'far' | 'ok' | 'near';
 
@@ -35,6 +42,7 @@ export default function PoseDemo() {
   const [pose, setPose] = useState<PoseDetectionEvent | null>(null);
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
   const [cameraPosition, setCameraPosition] = useState<CameraPosition>('back');
+  const [smoothedRatio, setSmoothedRatio] = useState<number | null>(null);
 
   const transformLandmark = (
     lm: PoseLandmark,
@@ -57,32 +65,55 @@ export default function PoseDemo() {
   const visibleLandmarks =
     pose?.landmarks.filter((lm) => lm.inFrameLikelihood > 0.3) ?? [];
 
-  // 거리 비율: 양 손목 (15: leftWrist, 16: rightWrist) frame x 거리 / frameWidth.
-  const distanceRatio: number | null = useMemo(() => {
-    if (!pose) return null;
-    const lw = pose.landmarks[15];
-    const rw = pose.landmarks[16];
-    if (!lw || !rw) return null;
-    if (lw.inFrameLikelihood < 0.3 || rw.inFrameLikelihood < 0.3) return null;
-    if (pose.frameWidth === 0) return null;
-    return Math.abs(rw.x - lw.x) / pose.frameWidth;
+  // 사람 인식 = 어깨 + 엉덩이 모두 likelihood ≥ 0.5 일 때만 true.
+  const isPersonDetected = useMemo(() => {
+    if (!pose) return false;
+    return CORE_BODY_INDICES.every((i) => {
+      const lm = pose.landmarks[i];
+      return lm && lm.inFrameLikelihood >= CORE_LIKELIHOOD_THRESHOLD;
+    });
   }, [pose]);
 
+  // 어깨 거리 비율 (raw, 매 프레임).
+  const rawDistanceRatio: number | null = useMemo(() => {
+    if (!pose || !isPersonDetected) return null;
+    const ls = pose.landmarks[11];
+    const rs = pose.landmarks[12];
+    if (!ls || !rs) return null;
+    if (pose.frameWidth === 0) return null;
+    return Math.abs(rs.x - ls.x) / pose.frameWidth;
+  }, [pose, isPersonDetected]);
+
+  // EMA 스무딩.
+  useEffect(() => {
+    if (rawDistanceRatio === null) {
+      setSmoothedRatio(null);
+      return;
+    }
+    setSmoothedRatio((prev) =>
+      prev === null
+        ? rawDistanceRatio
+        : SMOOTHING_ALPHA * rawDistanceRatio + (1 - SMOOTHING_ALPHA) * prev,
+    );
+  }, [rawDistanceRatio]);
+
   const distanceStatus: DistanceStatus =
-    distanceRatio === null ? 'no_pose' :
-    distanceRatio < DIST_FAR_THRESHOLD ? 'far' :
-    distanceRatio > DIST_NEAR_THRESHOLD ? 'near' :
+    smoothedRatio === null ? 'no_pose' :
+    smoothedRatio < DIST_FAR_THRESHOLD ? 'far' :
+    smoothedRatio > DIST_NEAR_THRESHOLD ? 'near' :
     'ok';
 
   const distanceMessage =
     distanceStatus === 'no_pose' ? '인식 대기 중 — 카메라 앞에 서주세요'
-    : distanceStatus === 'far' ? '뒤로 멀어요 — 좀 더 가까이 + 팔을 옆으로 펼치세요'
+    : distanceStatus === 'far' ? '뒤로 멀어요 — 좀 더 가까이'
     : distanceStatus === 'near' ? '너무 가까워요 — 한 발 뒤로'
     : '적절한 거리입니다 ✓';
 
-  // 막대 위에 점이 위치할 비율 (0~1, 0=멀다 끝, 1=가깝다 끝).
-  // 손목 비율 0~1 → bar 0~100% 그대로.
-  const dotPositionPercent = Math.min(Math.max((distanceRatio ?? 0) * 100, 0), 100);
+  // dot 위치: smoothed ratio 를 0~0.5 범위에서 0~100% 매핑 (어깨 기준).
+  const dotPositionPercent = Math.min(
+    Math.max(((smoothedRatio ?? 0) / 0.5) * 100, 0),
+    100,
+  );
 
   return (
     <View
@@ -98,7 +129,7 @@ export default function PoseDemo() {
         onPose={(e) => setPose(e.nativeEvent)}
       />
 
-      {pose && viewSize.width > 0 && (
+      {pose && viewSize.width > 0 && isPersonDetected && (
         <Canvas style={StyleSheet.absoluteFill}>
           {pose.landmarks.map((lm, i) => {
             if (lm.inFrameLikelihood < 0.3) return null;
@@ -146,18 +177,18 @@ export default function PoseDemo() {
         <View style={styles.distanceTrackRow}>
           <Text style={styles.distanceLabel}>멀다</Text>
           <View style={styles.distanceTrack}>
-            {/* 적정 영역 표시 */}
+            {/* 적정 영역 표시 (bar 좌표계는 dot 과 같이 0~0.5 → 0~100%). */}
             <View
               style={[
                 styles.distanceOkZone,
                 {
-                  left: `${DIST_FAR_THRESHOLD * 100}%`,
-                  right: `${(1 - DIST_NEAR_THRESHOLD) * 100}%`,
+                  left: `${(DIST_FAR_THRESHOLD / 0.5) * 100}%`,
+                  right: `${(1 - DIST_NEAR_THRESHOLD / 0.5) * 100}%`,
                 },
               ]}
             />
             {/* 현재 위치 dot */}
-            {distanceRatio !== null && (
+            {smoothedRatio !== null && (
               <View
                 style={[
                   styles.distanceDot,
@@ -172,10 +203,10 @@ export default function PoseDemo() {
 
       <View style={styles.statusOverlay}>
         <Text style={styles.statusText}>
-          Frame: {pose ? `${pose.frameWidth}×${pose.frameHeight}` : '대기 중'}
+          {pose ? `${pose.frameWidth}×${pose.frameHeight}` : '대기'}
           {' · '}
-          Visible: {visibleLandmarks.length}/33
-          {distanceRatio !== null && ` · ratio: ${distanceRatio.toFixed(2)}`}
+          {isPersonDetected ? `인식 OK · ${visibleLandmarks.length}/33` : '사람 미인식'}
+          {smoothedRatio !== null && ` · 어깨 ratio: ${smoothedRatio.toFixed(3)}`}
         </Text>
       </View>
 
