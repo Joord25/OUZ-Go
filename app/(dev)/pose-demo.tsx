@@ -327,17 +327,13 @@ export default function PoseDemo() {
             setSessionState('complete');
             clearInterval(interval);
           } else {
-            // 1번째: "박자에 맞춰주세요"
-            // 2번째: "한 번 더 놓치면 종료됩니다"
-            // 시각 배너 + 음성 (count 자리 1초 동안 발화 → 다음 비프와 약간 overlap 가능)
-            const message = missStreakLocal === 1
-              ? '박자에 맞춰주세요'
-              : '한 번 더 놓치면 종료됩니다';
+            // 짧게 — count 자리 1초 안에 끝나서 다음 비프와 안 겹침.
+            const message = missStreakLocal === 1 ? '맞춰주세요' : '마지막';
             Speech.stop();
             Speech.speak(message, {
               language: 'ko-KR',
               pitch: 1.1,
-              rate: 1.3,
+              rate: 1.2,
             });
             setMissWarning((prev) => ({ visible: true, key: prev.key + 1 }));
             cycleStartCount = squatCountRef.current;
@@ -712,7 +708,9 @@ export default function PoseDemo() {
       {/* 놓침 경고 배너 (1.5초 자동 hide) */}
       {mode === 'squat' && sessionState === 'active' && missWarning.visible && (
         <View style={styles.missWarningBanner} pointerEvents="none">
-          <Text style={styles.missWarningText}>⚠ 박자에 맞춰 움직이세요</Text>
+          <Text style={styles.missWarningText}>
+            {missStreak >= 2 ? '⚠ 마지막 — 다음 놓침 시 종료' : '⚠ 박자에 맞춰주세요'}
+          </Text>
         </View>
       )}
 
