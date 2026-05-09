@@ -72,14 +72,24 @@ const KOREAN_COUNT_NAMES = [
   '스물여섯', '스물일곱', '스물여덟', '스물아홉', '서른',
 ];
 
-function speakCount(n: number) {
-  const word = n >= 1 && n <= KOREAN_COUNT_NAMES.length
+function koreanCountWord(n: number): string {
+  return n >= 1 && n <= KOREAN_COUNT_NAMES.length
     ? KOREAN_COUNT_NAMES[n - 1]
     : String(n);
-  // 한국식 운동 카운트 cadence: "하나 둘 [N번째]"
-  // 예: 1번째 = "하나 둘 하나", 2번째 = "하나 둘 둘", ...
+}
+
+function speakOne() {
   Speech.stop();
-  Speech.speak(`하나 둘 ${word}`, {
+  Speech.speak('하나', {
+    language: 'ko-KR',
+    pitch: 1.1,
+    rate: 1.2,
+  });
+}
+
+function speakTwoWithCount(n: number) {
+  Speech.stop();
+  Speech.speak(`둘 ${koreanCountWord(n)}`, {
     language: 'ko-KR',
     pitch: 1.1,
     rate: 1.2,
@@ -261,12 +271,37 @@ export default function PoseDemo() {
     }
   }, [mode]);
 
-  // 카운트 변경 시 음성. 0 → 1 부터 발화.
+  // 카운트 cadence: UP→DOWN "하나", DOWN→UP "둘 [N]" (state 전환 기반).
+  const prevSquatStateRef = useRef<SquatState>('WAITING');
+  const prevSquatCountRef = useRef<number>(0);
   useEffect(() => {
-    if (mode !== 'squat' || squatCount === 0) return;
-    if (sessionState !== 'active') return;
-    speakCount(squatCount);
-  }, [squatCount, mode, sessionState]);
+    if (mode !== 'squat' || sessionState !== 'active') {
+      prevSquatStateRef.current = squatState;
+      prevSquatCountRef.current = squatCount;
+      return;
+    }
+    const prevState = prevSquatStateRef.current;
+    const prevCount = prevSquatCountRef.current;
+
+    if (prevState === 'UP' && squatState === 'DOWN') {
+      speakOne();
+    } else if (prevState === 'DOWN' && squatState === 'UP') {
+      // rep 카운트 됐으면 "둘 [N]", 아니면 그냥 "둘".
+      if (squatCount > prevCount) {
+        speakTwoWithCount(squatCount);
+      } else {
+        Speech.stop();
+        Speech.speak('둘', {
+          language: 'ko-KR',
+          pitch: 1.1,
+          rate: 1.2,
+        });
+      }
+    }
+
+    prevSquatStateRef.current = squatState;
+    prevSquatCountRef.current = squatCount;
+  }, [squatState, squatCount, mode, sessionState]);
 
   // 세션 시작 (idle → countdown → active → complete).
   const startSession = useCallback(() => {
