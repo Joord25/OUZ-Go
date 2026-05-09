@@ -1,4 +1,5 @@
 import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
+import { useAudioPlayer } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -58,16 +59,6 @@ const T_POSE_Y_TOLERANCE_RATIO = 0.08;
 //   beat 2: 음성 count (rep 완료) 또는 "아웃"
 const CADENCE_BEAT_MS = 1000;
 
-// 비프 음성 (Speech 로 짧고 높은 톤).
-function speakBeep() {
-  Speech.stop();
-  Speech.speak('삑', {
-    language: 'ko-KR',
-    pitch: 1.5,
-    rate: 1.6,
-  });
-}
-
 // 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
 const SQUAT_MIN_REP_DURATION_MS = 300;
 
@@ -105,6 +96,13 @@ export default function PoseDemo() {
   const [cameraPosition, setCameraPosition] = useState<CameraPosition>('back');
   const [smoothedRatio, setSmoothedRatio] = useState<number | null>(null);
   const [mode, setMode] = useState<ExerciseMode>('view');
+
+  // 비프 사운드 (메트로놈 비트). 150ms 1kHz.
+  const beepPlayer = useAudioPlayer(require('../../assets/sounds/beep.wav'));
+  const playBeep = useCallback(() => {
+    beepPlayer.seekTo(0);
+    beepPlayer.play();
+  }, [beepPlayer]);
 
   // 스쿼트 state machine (ref 로 관리해서 closure stale 회피).
   const [squatCount, setSquatCount] = useState(0);
@@ -279,12 +277,12 @@ export default function PoseDemo() {
     let expectedRepNum = 1;
 
     // 첫 비트 즉시: 삑 (down)
-    speakBeep();
+    playBeep();
     beat = 'up';
 
     const interval = setInterval(() => {
       if (beat === 'up') {
-        speakBeep();
+        playBeep();
         beat = 'count';
       } else if (beat === 'count') {
         const didRep = squatCountRef.current > cycleStartCount;
@@ -310,13 +308,13 @@ export default function PoseDemo() {
           clearInterval(interval);
         }
       } else if (beat === 'down') {
-        speakBeep();
+        playBeep();
         beat = 'up';
       }
     }, CADENCE_BEAT_MS);
 
     return () => clearInterval(interval);
-  }, [mode, sessionState]);
+  }, [mode, sessionState, playBeep]);
 
   // 세션 시작 (idle → intro → active → complete).
   const startSession = useCallback(() => {
