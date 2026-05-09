@@ -1,4 +1,5 @@
 import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
+import * as Speech from 'expo-speech';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { OuzPoseView } from '../../modules/OuzPose';
@@ -46,6 +47,38 @@ const SQUAT_MIN_REP_DURATION_MS = 300;
 
 // 임계점 EMA — 서있을 때 천천히 적응 (사용자 카메라 거리 변화 흡수).
 const THRESHOLD_EMA_ALPHA = 0.05;
+
+// 한국어 자연수 (PRD 5-1 "하나, 둘, 셋..." 음성 가이드).
+const KOREAN_COUNT_NAMES = [
+  '하나', '둘', '셋', '넷', '다섯',
+  '여섯', '일곱', '여덟', '아홉', '열',
+  '열하나', '열둘', '열셋', '열넷', '열다섯',
+  '열여섯', '열일곱', '열여덟', '열아홉', '스물',
+  '스물하나', '스물둘', '스물셋', '스물넷', '스물다섯',
+  '스물여섯', '스물일곱', '스물여덟', '스물아홉', '서른',
+];
+
+function speakCount(n: number) {
+  const word = n >= 1 && n <= KOREAN_COUNT_NAMES.length
+    ? KOREAN_COUNT_NAMES[n - 1]
+    : String(n);
+  // 이전 음성 중단 후 새로 발화 — 빠른 카운트도 동기화 유지.
+  Speech.stop();
+  Speech.speak(word, {
+    language: 'ko-KR',
+    pitch: 1.1,
+    rate: 1.15,
+  });
+}
+
+function speakMessage(text: string) {
+  Speech.stop();
+  Speech.speak(text, {
+    language: 'ko-KR',
+    pitch: 1.0,
+    rate: 1.0,
+  });
+}
 
 export default function PoseDemo() {
   const [pose, setPose] = useState<PoseDetectionEvent | null>(null);
@@ -182,8 +215,17 @@ export default function PoseDemo() {
       setSquatState('WAITING');
       setThresholdY(null);
       downEnteredAtRef.current = 0;
+      speakMessage('스쿼트 시작');
+    } else {
+      Speech.stop();
     }
   }, [mode]);
+
+  // 카운트 변경 시 음성. 0 → 1 부터 발화.
+  useEffect(() => {
+    if (mode !== 'squat' || squatCount === 0) return;
+    speakCount(squatCount);
+  }, [squatCount, mode]);
 
   const distanceStatus: DistanceStatus =
     smoothedRatio === null ? 'no_pose' :
