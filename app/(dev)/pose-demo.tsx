@@ -1,5 +1,5 @@
 import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { OuzPoseView } from '../../modules/OuzPose';
 import type {
@@ -8,10 +8,9 @@ import type {
   PoseLandmark,
 } from '../../modules/OuzPose/src/OuzPose.types';
 
-// Phase 0c: 거리 가이드 바 (PRD 6-3) + 안정화 v2.
-//  - 측정: 양 어깨 (11, 12) x 거리 / frame width  ← 손목보다 안정적
-//  - 스무딩: EMA (alpha=0.15) — 떨림 둔화
-//  - 사람 인식 체크: 어깨 + 엉덩이 likelihood ≥ 0.5 → 스켈레톤 표시
+// Phase 0c-v3: 거리 가이드 + 사람 인식 + 스쿼트 카운트 모드 (PRD 부록 A).
+// 스쿼트 알고리즘: hip y 가 무릎 y 위/아래 → state machine → UP→DOWN→UP = 1 rep.
+// minRepDuration 0.8s 이상 충족해야 진짜 카운트 (가짜 까딱 차단).
 
 const CONNECTIONS: [number, number][] = [
   [11, 12],
@@ -38,11 +37,24 @@ const CORE_LIKELIHOOD_THRESHOLD = 0.5;
 
 type DistanceStatus = 'no_pose' | 'far' | 'ok' | 'near';
 
+type ExerciseMode = 'view' | 'squat';
+
+type SquatState = 'WAITING' | 'UP' | 'DOWN';
+
+// 스쿼트 minRepDuration (PRD 부록 A).
+const SQUAT_MIN_REP_DURATION_MS = 800;
+
 export default function PoseDemo() {
   const [pose, setPose] = useState<PoseDetectionEvent | null>(null);
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
   const [cameraPosition, setCameraPosition] = useState<CameraPosition>('back');
   const [smoothedRatio, setSmoothedRatio] = useState<number | null>(null);
+  const [mode, setMode] = useState<ExerciseMode>('view');
+
+  // 스쿼트 state machine (ref 로 관리해서 closure stale 회피).
+  const [squatCount, setSquatCount] = useState(0);
+  const [squatState, setSquatState] = useState<SquatState>('WAITING');
+  const downEnteredAtRef = useRef<number>(0);
 
   const transformLandmark = (
     lm: PoseLandmark,
@@ -96,6 +108,61 @@ export default function PoseDemo() {
         : SMOOTHING_ALPHA * rawDistanceRatio + (1 - SMOOTHING_ALPHA) * prev,
     );
   }, [rawDistanceRatio]);
+
+  // 스쿼트 hip / knee y (양쪽 평균).
+  const squatGeometry = useMemo(() => {
+    if (!pose || !isPersonDetected) return null;
+    const lh = pose.landmarks[23];
+    const rh = pose.landmarks[24];
+    const lk = pose.landmarks[25];
+    const rk = pose.landmarks[26];
+    if (!lh || !rh || !lk || !rk) return null;
+    if (
+      lh.inFrameLikelihood < 0.4 ||
+      rh.inFrameLikelihood < 0.4 ||
+      lk.inFrameLikelihood < 0.4 ||
+      rk.inFrameLikelihood < 0.4
+    ) {
+      return null;
+    }
+    const hipY = (lh.y + rh.y) / 2;
+    const kneeY = (lk.y + rk.y) / 2;
+    return { hipY, kneeY };
+  }, [pose, isPersonDetected]);
+
+  // 스쿼트 state machine.
+  useEffect(() => {
+    if (mode !== 'squat' || !squatGeometry) return;
+
+    // hip y < knee y → 서있음 (UP). 화면 좌표는 위가 0 이라 hip 이 위쪽 = 작은 y.
+    const isStanding = squatGeometry.hipY < squatGeometry.kneeY;
+    const now = Date.now();
+
+    setSquatState((prev) => {
+      if (prev === 'WAITING' && isStanding) return 'UP';
+      if (prev === 'UP' && !isStanding) {
+        downEnteredAtRef.current = now;
+        return 'DOWN';
+      }
+      if (prev === 'DOWN' && isStanding) {
+        const repDurationMs = now - downEnteredAtRef.current;
+        if (repDurationMs >= SQUAT_MIN_REP_DURATION_MS) {
+          setSquatCount((c) => c + 1);
+        }
+        return 'UP';
+      }
+      return prev;
+    });
+  }, [squatGeometry, mode]);
+
+  // 모드 변경 시 카운트 리셋.
+  useEffect(() => {
+    if (mode === 'squat') {
+      setSquatCount(0);
+      setSquatState('WAITING');
+      downEnteredAtRef.current = 0;
+    }
+  }, [mode]);
 
   const distanceStatus: DistanceStatus =
     smoothedRatio === null ? 'no_pose' :
@@ -162,6 +229,23 @@ export default function PoseDemo() {
               />
             );
           })}
+          {/* 스쿼트 모드: 무릎 임계 가로선 */}
+          {mode === 'squat' && squatGeometry && (() => {
+            const kneeScreen = transformLandmark(
+              { x: 0, y: squatGeometry.kneeY, z: 0, inFrameLikelihood: 1 },
+              pose.frameWidth,
+              pose.frameHeight,
+            );
+            return (
+              <Line
+                key="squat-threshold"
+                p1={vec(0, kneeScreen.y)}
+                p2={vec(viewSize.width, kneeScreen.y)}
+                color={squatState === 'DOWN' ? '#00FF88' : '#FFA500'}
+                strokeWidth={3}
+              />
+            );
+          })()}
         </Canvas>
       )}
 
@@ -210,7 +294,54 @@ export default function PoseDemo() {
         </Text>
       </View>
 
+      {/* 스쿼트 카운트 (큰 숫자) */}
+      {mode === 'squat' && (
+        <View style={styles.squatPanel}>
+          <Text style={styles.squatLabel}>스쿼트</Text>
+          <Text style={styles.squatCount}>{squatCount}</Text>
+          <Text
+            style={[
+              styles.squatState,
+              squatState === 'DOWN' && styles.squatStateDown,
+            ]}
+          >
+            {squatState === 'WAITING' ? '시작 자세 대기' :
+             squatState === 'UP' ? '서있음 (UP)' :
+             '앉음 (DOWN)'}
+          </Text>
+        </View>
+      )}
+
       <View style={styles.controlsBar}>
+        {/* 운동 모드 토글 */}
+        <View style={styles.modeRow}>
+          <Pressable
+            onPress={() => setMode('view')}
+            style={[styles.modeButton, mode === 'view' && styles.modeButtonActive]}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                mode === 'view' && styles.modeButtonTextActive,
+              ]}
+            >
+              보기
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setMode('squat')}
+            style={[styles.modeButton, mode === 'squat' && styles.modeButtonActive]}
+          >
+            <Text
+              style={[
+                styles.modeButtonText,
+                mode === 'squat' && styles.modeButtonTextActive,
+              ]}
+            >
+              스쿼트
+            </Text>
+          </Pressable>
+        </View>
         <Pressable
           onPress={() =>
             setCameraPosition((p) => (p === 'back' ? 'front' : 'back'))
@@ -218,7 +349,7 @@ export default function PoseDemo() {
           style={styles.toggleButton}
         >
           <Text style={styles.toggleButtonText}>
-            {cameraPosition === 'back' ? '전면 카메라' : '후면 카메라'} 로 전환
+            {cameraPosition === 'back' ? '전면' : '후면'} 카메라
           </Text>
         </Pressable>
       </View>
@@ -313,16 +444,72 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     alignItems: 'center',
+    gap: 12,
+  },
+  modeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    padding: 4,
+    borderRadius: 24,
+  },
+  modeButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 18,
+    borderRadius: 20,
+  },
+  modeButtonActive: {
+    backgroundColor: '#fff',
+  },
+  modeButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modeButtonTextActive: {
+    color: '#000',
   },
   toggleButton: {
     backgroundColor: 'rgba(255, 165, 0, 0.9)',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 24,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 22,
   },
   toggleButtonText: {
     color: '#000',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
+  },
+  // 스쿼트 카운트 패널 (우상단, status 박스 아래)
+  squatPanel: {
+    position: 'absolute',
+    top: 180,
+    right: 16,
+    padding: 14,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    borderRadius: 12,
+    minWidth: 130,
+    alignItems: 'center',
+  },
+  squatLabel: {
+    color: '#FFA500',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  squatCount: {
+    color: '#fff',
+    fontSize: 56,
+    fontWeight: '900',
+    lineHeight: 60,
+  },
+  squatState: {
+    color: '#FFA500',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  squatStateDown: {
+    color: '#00FF88',
   },
 });
