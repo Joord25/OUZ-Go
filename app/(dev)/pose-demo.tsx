@@ -45,9 +45,8 @@ type SquatState = 'WAITING' | 'UP' | 'DOWN';
 
 type SessionState = 'idle' | 'intro' | 'active' | 'complete';
 
-// 30초 active 시간 (PRD 5-1).
-const ACTIVE_SESSION_SEC = 30;
-const FINAL_COUNTDOWN_VOICE_SEC = 5;
+// 신호음에서 연속 탈락 한도. 이 횟수 이상 → 스탑.
+const MAX_CONSECUTIVE_MISSES = 3;
 
 // T자세 트리거 — 양 손목 어깨 높이 + 어깨 밖으로 펼침 + 1.5초 유지.
 const T_POSE_HOLD_MS = 1500;
@@ -110,10 +109,10 @@ export default function PoseDemo() {
   const [thresholdY, setThresholdY] = useState<number | null>(null);
   const downEnteredAtRef = useRef<number>(0);
 
-  // 세션 (시간 기반).
+  // 세션.
   const [sessionState, setSessionState] = useState<SessionState>('idle');
-  const [remainingSec, setRemainingSec] = useState(0);
-  const [endReason, setEndReason] = useState<'time' | 'out' | null>(null);
+  const [endReason, setEndReason] = useState<'out' | null>(null);
+  const [missStreak, setMissStreak] = useState(0);
   // 음성 announce 시 stale closure 회피용.
   const squatCountRef = useRef(0);
   useEffect(() => {
@@ -264,19 +263,19 @@ export default function PoseDemo() {
   }, [mode]);
 
   // 메트로놈 cadence (3-비트 cycle, 1초 간격, 3초/rep).
-  // 음성이 페이스 LEAD — 사용자는 비프 + count 신호를 따라옴.
   // Cycle:
-  //   Beat 0 (down): 삑 (비프)  ← 사용자 내려감 (1초)
-  //   Beat 1 (up):   삑 (비프)  ← 사용자 올라옴 (1초)
-  //   Beat 2 (count): "[N번째]" 음성 — rep 했으면, 못했으면 "아웃"
+  //   Beat 0 (down): 삑 (비프) → 사용자 내려감
+  //   Beat 1 (up):   삑 (비프) → 사용자 올라옴
+  //   Beat 2 (count): rep 했으면 "[N번째]", 못했으면 "놓침"
+  // 연속 3회 놓침 → "스탑" + 종료.
   useEffect(() => {
     if (mode !== 'squat' || sessionState !== 'active') return;
 
     let beat: 'down' | 'up' | 'count' = 'down';
     let cycleStartCount = squatCountRef.current;
     let expectedRepNum = 1;
+    let missStreakLocal = 0;
 
-    // 첫 비트 즉시: 삑 (down)
     playBeep();
     beat = 'up';
 
@@ -295,17 +294,32 @@ export default function PoseDemo() {
           });
           expectedRepNum += 1;
           cycleStartCount = squatCountRef.current;
+          missStreakLocal = 0;
+          setMissStreak(0);
           beat = 'down';
         } else {
-          Speech.stop();
-          Speech.speak('아웃', {
-            language: 'ko-KR',
-            pitch: 1.0,
-            rate: 1.0,
-          });
-          setEndReason('out');
-          setSessionState('complete');
-          clearInterval(interval);
+          missStreakLocal += 1;
+          setMissStreak(missStreakLocal);
+          if (missStreakLocal >= MAX_CONSECUTIVE_MISSES) {
+            Speech.stop();
+            Speech.speak('스탑', {
+              language: 'ko-KR',
+              pitch: 1.0,
+              rate: 1.0,
+            });
+            setEndReason('out');
+            setSessionState('complete');
+            clearInterval(interval);
+          } else {
+            Speech.stop();
+            Speech.speak('놓침', {
+              language: 'ko-KR',
+              pitch: 1.0,
+              rate: 1.3,
+            });
+            cycleStartCount = squatCountRef.current;
+            beat = 'down';
+          }
         }
       } else if (beat === 'down') {
         playBeep();
@@ -317,31 +331,39 @@ export default function PoseDemo() {
   }, [mode, sessionState, playBeep]);
 
   // 세션 시작 (idle → intro → active → complete).
+  // 인트로: "지금부터 신호에 맞춰 운동을 시작하겠습니다" → 잠시 → "셋" → "둘" → "하나" → active.
   const startSession = useCallback(() => {
     Speech.stop();
     setSquatCount(0);
     setSquatState('WAITING');
     setThresholdY(null);
     downEnteredAtRef.current = 0;
-    setRemainingSec(0);
     setSessionState('intro');
     setEndReason(null);
+    setMissStreak(0);
     setTPoseHoldProgress(0);
     tPoseStartRef.current = null;
 
-    // 인트로 음성 → 끝나면 active 진입 (첫 비프 발사).
-    Speech.speak(
-      '지금부터 신호에 맞춰 운동을 시작하겠습니다. 셋, 둘, 하나.',
-      {
-        language: 'ko-KR',
-        pitch: 1.0,
-        rate: 1.0,
-        onDone: () => {
-          setSessionState('active');
-          setRemainingSec(ACTIVE_SESSION_SEC);
-        },
+    const announceOpts = { language: 'ko-KR', pitch: 1.0, rate: 1.0 } as const;
+    const numberOpts = { language: 'ko-KR', pitch: 1.2, rate: 1.0 } as const;
+
+    Speech.speak('지금부터 신호에 맞춰 운동을 시작하겠습니다.', {
+      ...announceOpts,
+      onDone: () => {
+        setTimeout(() => {
+          Speech.speak('셋', numberOpts);
+          setTimeout(() => {
+            Speech.speak('둘', numberOpts);
+            setTimeout(() => {
+              Speech.speak('하나', numberOpts);
+              setTimeout(() => {
+                setSessionState('active');
+              }, 1000);
+            }, 1000);
+          }, 1000);
+        }, 500);
       },
-    );
+    });
   }, []);
 
   // T자세 감지 — 양 손목/팔꿈치 어깨 높이 + 어깨 밖 펼침.
@@ -419,30 +441,7 @@ export default function PoseDemo() {
     return () => clearInterval(interval);
   }, [isTPose, distanceStatus, mode, sessionState, startSession]);
 
-  // active 1초 tick — 매 초 remainingSec 감소.
-  useEffect(() => {
-    if (sessionState !== 'active') return;
-    const interval = setInterval(() => {
-      setRemainingSec((prev) => Math.max(prev - 1, 0));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [sessionState]);
-
-  // active 종료 + 마지막 5초 음성.
-  useEffect(() => {
-    if (sessionState !== 'active') return;
-    if (remainingSec === 0) {
-      Speech.stop();
-      Speech.speak(`30초 동안 ${squatCountRef.current}개 했어요`, {
-        language: 'ko-KR',
-        pitch: 1.0,
-        rate: 1.0,
-      });
-      setEndReason('time');
-      setSessionState('complete');
-    }
-    // 마지막 5초 음성은 메트로놈 비프와 겹치므로 생략 (시각만 유지)
-  }, [remainingSec, sessionState]);
+  // 30초 시간 제한 제거 — 신호음에 맞춰 무한 (3연속 탈락까지 진행).
 
 
   const distanceStatus: DistanceStatus =
@@ -593,14 +592,14 @@ export default function PoseDemo() {
         </Text>
       </View>
 
-      {/* 스쿼트 카운트 (큰 숫자) + 타이머 */}
+      {/* 스쿼트 카운트 (큰 숫자) + 놓침 카운터 */}
       {mode === 'squat' && (
         <View style={styles.squatPanel}>
           <Text style={styles.squatLabel}>스쿼트</Text>
           <Text style={styles.squatCount}>{squatCount}</Text>
-          {sessionState === 'active' && (
-            <Text style={styles.squatTimer}>
-              {remainingSec}초
+          {sessionState === 'active' && missStreak > 0 && (
+            <Text style={styles.squatMiss}>
+              놓침 {missStreak} / {MAX_CONSECUTIVE_MISSES}
             </Text>
           )}
           <Text
@@ -633,7 +632,7 @@ export default function PoseDemo() {
       {mode === 'squat' && sessionState === 'complete' && (
         <View style={styles.completeOverlay}>
           <Text style={styles.completeTitle}>
-            {endReason === 'out' ? '아웃' : '30초 완료'}
+            {endReason === 'out' ? '스탑' : '완료'}
           </Text>
           <Text style={styles.completeCount}>{squatCount}</Text>
           <Text style={styles.completeUnit}>개</Text>
@@ -883,10 +882,10 @@ const styles = StyleSheet.create({
   squatStateGated: {
     color: '#FF6464',
   },
-  squatTimer: {
-    color: '#FFA500',
-    fontSize: 24,
-    fontWeight: '800',
+  squatMiss: {
+    color: '#FF6464',
+    fontSize: 14,
+    fontWeight: '700',
     marginTop: 4,
   },
   // idle 안내 (T자세 트리거 대기)
