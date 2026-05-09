@@ -1,6 +1,6 @@
 import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
 import * as Speech from 'expo-speech';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { OuzPoseView } from '../../modules/OuzPose';
 import type {
@@ -41,6 +41,13 @@ type DistanceStatus = 'no_pose' | 'far' | 'ok' | 'near';
 type ExerciseMode = 'view' | 'squat';
 
 type SquatState = 'WAITING' | 'UP' | 'DOWN';
+
+type SessionState = 'idle' | 'countdown' | 'active' | 'complete';
+
+// PRD 5-1: 30초 시간 기반 세션 + 5초 사전 카운트다운.
+const PRE_COUNTDOWN_SEC = 5;
+const ACTIVE_SESSION_SEC = 30;
+const FINAL_COUNTDOWN_VOICE_SEC = 5; // 마지막 N초 음성 카운트다운
 
 // 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
 const SQUAT_MIN_REP_DURATION_MS = 300;
@@ -92,6 +99,15 @@ export default function PoseDemo() {
   const [squatState, setSquatState] = useState<SquatState>('WAITING');
   const [thresholdY, setThresholdY] = useState<number | null>(null);
   const downEnteredAtRef = useRef<number>(0);
+
+  // 세션 (시간 기반).
+  const [sessionState, setSessionState] = useState<SessionState>('idle');
+  const [remainingSec, setRemainingSec] = useState(0);
+  // 음성 announce 시 stale closure 회피용.
+  const squatCountRef = useRef(0);
+  useEffect(() => {
+    squatCountRef.current = squatCount;
+  }, [squatCount]);
 
   const transformLandmark = (
     lm: PoseLandmark,
@@ -183,10 +199,11 @@ export default function PoseDemo() {
     });
   }, [squatGeometry, squatState, mode]);
 
-  // 스쿼트 state machine. 거리 적절 (distanceStatus === 'ok') 일 때만 작동.
+  // 스쿼트 state machine. 거리 적절 + 세션 active 일 때만 카운트.
   useEffect(() => {
     if (mode !== 'squat' || !squatGeometry || thresholdY === null) return;
     if (distanceStatus !== 'ok') return; // 멀거나 가까우면 카운트 X
+    if (sessionState !== 'active') return; // 세션 active 일 때만 카운트
 
     // hip y < threshold → 서있음 (UP). hip 이 화면 위쪽 (작은 y) 일수록 서있음.
     const isAboveThreshold = squatGeometry.hipY < thresholdY;
@@ -207,26 +224,84 @@ export default function PoseDemo() {
       }
       return prev;
     });
-  }, [squatGeometry, thresholdY, mode, distanceStatus]);
+  }, [squatGeometry, thresholdY, mode, distanceStatus, sessionState]);
 
-  // 모드 변경 시 카운트 + threshold 리셋.
+  // 모드 변경 시 카운트 + threshold + 세션 리셋.
   useEffect(() => {
     if (mode === 'squat') {
       setSquatCount(0);
       setSquatState('WAITING');
       setThresholdY(null);
+      setSessionState('idle');
+      setRemainingSec(0);
       downEnteredAtRef.current = 0;
-      speakMessage('스쿼트 시작');
     } else {
       Speech.stop();
+      setSessionState('idle');
     }
   }, [mode]);
 
   // 카운트 변경 시 음성. 0 → 1 부터 발화.
   useEffect(() => {
     if (mode !== 'squat' || squatCount === 0) return;
+    if (sessionState !== 'active') return;
     speakCount(squatCount);
-  }, [squatCount, mode]);
+  }, [squatCount, mode, sessionState]);
+
+  // 세션 시작 (idle → countdown → active → complete).
+  const startSession = useCallback(() => {
+    Speech.stop();
+    setSquatCount(0);
+    setSquatState('WAITING');
+    downEnteredAtRef.current = 0;
+    setRemainingSec(PRE_COUNTDOWN_SEC);
+    setSessionState('countdown');
+  }, []);
+
+  // 1초 tick — countdown / active 동안 매 초 remainingSec 감소.
+  useEffect(() => {
+    if (sessionState !== 'countdown' && sessionState !== 'active') return;
+    const interval = setInterval(() => {
+      setRemainingSec((prev) => Math.max(prev - 1, 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [sessionState]);
+
+  // remainingSec 변화에 따른 음성 + 상태 전환.
+  useEffect(() => {
+    if (sessionState === 'countdown') {
+      if (remainingSec === 0) {
+        speakMessage('시작');
+        setRemainingSec(ACTIVE_SESSION_SEC);
+        setSessionState('active');
+      } else {
+        // 5,4,3,2,1
+        Speech.stop();
+        Speech.speak(String(remainingSec), {
+          language: 'ko-KR',
+          pitch: 1.2,
+          rate: 1.2,
+        });
+      }
+    } else if (sessionState === 'active') {
+      if (remainingSec === 0) {
+        Speech.stop();
+        Speech.speak(`30초 동안 ${squatCountRef.current}개 했어요`, {
+          language: 'ko-KR',
+          pitch: 1.0,
+          rate: 1.0,
+        });
+        setSessionState('complete');
+      } else if (remainingSec <= FINAL_COUNTDOWN_VOICE_SEC && remainingSec > 0) {
+        Speech.stop();
+        Speech.speak(String(remainingSec), {
+          language: 'ko-KR',
+          pitch: 1.3,
+          rate: 1.2,
+        });
+      }
+    }
+  }, [remainingSec, sessionState]);
 
   const distanceStatus: DistanceStatus =
     smoothedRatio === null ? 'no_pose' :
@@ -376,19 +451,27 @@ export default function PoseDemo() {
         </Text>
       </View>
 
-      {/* 스쿼트 카운트 (큰 숫자) */}
+      {/* 스쿼트 카운트 (큰 숫자) + 타이머 */}
       {mode === 'squat' && (
         <View style={styles.squatPanel}>
           <Text style={styles.squatLabel}>스쿼트</Text>
           <Text style={styles.squatCount}>{squatCount}</Text>
+          {sessionState === 'active' && (
+            <Text style={styles.squatTimer}>
+              {remainingSec}초
+            </Text>
+          )}
           <Text
             style={[
               styles.squatState,
-              squatState === 'DOWN' && distanceStatus === 'ok' && styles.squatStateDown,
-              distanceStatus !== 'ok' && styles.squatStateGated,
+              squatState === 'DOWN' && distanceStatus === 'ok' && sessionState === 'active' && styles.squatStateDown,
+              (distanceStatus !== 'ok' || sessionState !== 'active') && styles.squatStateGated,
             ]}
           >
-            {distanceStatus !== 'ok' ? '거리 조정 필요 ⚠' :
+            {sessionState === 'idle' ? '시작 버튼 누르기' :
+             sessionState === 'countdown' ? '준비 중...' :
+             sessionState === 'complete' ? '완료!' :
+             distanceStatus !== 'ok' ? '거리 조정 필요 ⚠' :
              squatState === 'WAITING' ? '시작 자세 대기' :
              squatState === 'UP' ? '서있음 (UP)' :
              '앉음 (DOWN)'}
@@ -396,46 +479,85 @@ export default function PoseDemo() {
         </View>
       )}
 
-      <View style={styles.controlsBar}>
-        {/* 운동 모드 토글 */}
-        <View style={styles.modeRow}>
-          <Pressable
-            onPress={() => setMode('view')}
-            style={[styles.modeButton, mode === 'view' && styles.modeButtonActive]}
-          >
-            <Text
-              style={[
-                styles.modeButtonText,
-                mode === 'view' && styles.modeButtonTextActive,
-              ]}
-            >
-              보기
-            </Text>
+      {/* 사전 카운트다운 (큰 중앙 숫자) */}
+      {mode === 'squat' && sessionState === 'countdown' && remainingSec > 0 && (
+        <View style={styles.centerOverlay} pointerEvents="none">
+          <Text style={styles.bigCountdown}>{remainingSec}</Text>
+          <Text style={styles.bigCountdownLabel}>준비</Text>
+        </View>
+      )}
+
+      {/* 세션 완료 결과 화면 */}
+      {mode === 'squat' && sessionState === 'complete' && (
+        <View style={styles.completeOverlay}>
+          <Text style={styles.completeTitle}>30초 완료</Text>
+          <Text style={styles.completeCount}>{squatCount}</Text>
+          <Text style={styles.completeUnit}>개</Text>
+          <Pressable style={styles.completeButton} onPress={startSession}>
+            <Text style={styles.completeButtonText}>다시 시작</Text>
           </Pressable>
+        </View>
+      )}
+
+      {/* 시작 버튼 (스쿼트 + idle 일 때만) */}
+      {mode === 'squat' && sessionState === 'idle' && (
+        <View style={styles.startButtonContainer}>
           <Pressable
-            onPress={() => setMode('squat')}
-            style={[styles.modeButton, mode === 'squat' && styles.modeButtonActive]}
+            onPress={startSession}
+            style={styles.startButton}
+            disabled={distanceStatus !== 'ok'}
           >
-            <Text
-              style={[
-                styles.modeButtonText,
-                mode === 'squat' && styles.modeButtonTextActive,
-              ]}
-            >
-              스쿼트
+            <Text style={styles.startButtonText}>
+              {distanceStatus === 'ok' ? '시작' : '거리 맞추고 시작'}
             </Text>
           </Pressable>
         </View>
-        <Pressable
-          onPress={() =>
-            setCameraPosition((p) => (p === 'back' ? 'front' : 'back'))
-          }
-          style={styles.toggleButton}
-        >
-          <Text style={styles.toggleButtonText}>
-            {cameraPosition === 'back' ? '전면' : '후면'} 카메라
-          </Text>
-        </Pressable>
+      )}
+
+      <View style={styles.controlsBar}>
+        {/* 운동 모드 토글 + 카메라 (countdown/active 중에는 숨김) */}
+        {(sessionState === 'idle' || sessionState === 'complete') && (
+          <>
+            <View style={styles.modeRow}>
+              <Pressable
+                onPress={() => setMode('view')}
+                style={[styles.modeButton, mode === 'view' && styles.modeButtonActive]}
+              >
+                <Text
+                  style={[
+                    styles.modeButtonText,
+                    mode === 'view' && styles.modeButtonTextActive,
+                  ]}
+                >
+                  보기
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setMode('squat')}
+                style={[styles.modeButton, mode === 'squat' && styles.modeButtonActive]}
+              >
+                <Text
+                  style={[
+                    styles.modeButtonText,
+                    mode === 'squat' && styles.modeButtonTextActive,
+                  ]}
+                >
+                  스쿼트
+                </Text>
+              </Pressable>
+            </View>
+            <Pressable
+              onPress={() =>
+                setCameraPosition((p) => (p === 'back' ? 'front' : 'back'))
+              }
+              style={styles.toggleButton}
+            >
+              <Text style={styles.toggleButtonText}>
+                {cameraPosition === 'back' ? '전면' : '후면'} 카메라
+              </Text>
+            </Pressable>
+          </>
+        )}
       </View>
     </View>
   );
@@ -598,5 +720,99 @@ const styles = StyleSheet.create({
   },
   squatStateGated: {
     color: '#FF6464',
+  },
+  squatTimer: {
+    color: '#FFA500',
+    fontSize: 24,
+    fontWeight: '800',
+    marginTop: 4,
+  },
+  // 시작 버튼 (큰)
+  startButtonContainer: {
+    position: 'absolute',
+    bottom: 130,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  startButton: {
+    backgroundColor: '#00C853',
+    paddingVertical: 18,
+    paddingHorizontal: 56,
+    borderRadius: 36,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: 8,
+  },
+  startButtonText: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  // 사전 카운트다운 (중앙 큰 숫자)
+  centerOverlay: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  bigCountdown: {
+    color: '#fff',
+    fontSize: 200,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowOffset: { width: 0, height: 4 },
+    textShadowRadius: 12,
+  },
+  bigCountdownLabel: {
+    color: '#FFA500',
+    fontSize: 28,
+    fontWeight: '700',
+    marginTop: -20,
+  },
+  // 완료 결과 화면
+  completeOverlay: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+  },
+  completeTitle: {
+    color: '#FFA500',
+    fontSize: 28,
+    fontWeight: '800',
+    marginBottom: 12,
+  },
+  completeCount: {
+    color: '#fff',
+    fontSize: 140,
+    fontWeight: '900',
+    lineHeight: 150,
+  },
+  completeUnit: {
+    color: '#fff',
+    fontSize: 32,
+    fontWeight: '600',
+    marginTop: -10,
+    marginBottom: 32,
+  },
+  completeButton: {
+    backgroundColor: '#FFA500',
+    paddingVertical: 14,
+    paddingHorizontal: 40,
+    borderRadius: 32,
+  },
+  completeButtonText: {
+    color: '#000',
+    fontSize: 18,
+    fontWeight: '700',
   },
 });
