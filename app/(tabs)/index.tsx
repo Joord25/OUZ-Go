@@ -22,6 +22,14 @@ export default function HomeScreen() {
         <HelloWave />
       </ThemedView>
       <ThemedView style={styles.stepContainer}>
+        <ThemedText type="subtitle">Phase 0 검증</ThemedText>
+        <Link href="/(dev)/pose-demo" style={styles.devLink}>
+          <ThemedText type="defaultSemiBold" style={styles.devLinkText}>
+            → Pose Demo 열기
+          </ThemedText>
+        </Link>
+      </ThemedView>
+      <ThemedView style={styles.stepContainer}>
         <ThemedText type="subtitle">Step 1: Try it</ThemedText>
         <ThemedText>
           Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
@@ -94,5 +102,16 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     position: 'absolute',
+  },
+  devLink: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#FFA500',
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  devLinkText: {
+    color: '#000',
+    fontSize: 16,
   },
 });
