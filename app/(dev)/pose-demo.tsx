@@ -342,7 +342,7 @@ export default function PoseDemo() {
   //   Beat 2 (count): rep 했으면 "[N번째]", 못했으면 "놓침"
   // 연속 3회 놓침 → "스탑" + 종료.
   useEffect(() => {
-    if (mode !== 'squat' || sessionState !== 'active') return;
+    if (mode === 'view' || sessionState !== 'active') return;
 
     let beat: 'down' | 'up' | 'count' = 'down';
     let cycleStartCount = squatCountRef.current;
@@ -486,7 +486,7 @@ export default function PoseDemo() {
 
   // idle 상태에서 거리 변경 시 음성 안내 (전환 시점에 1번).
   useEffect(() => {
-    if (mode !== 'squat' || sessionState !== 'idle') {
+    if (mode === 'view' || sessionState !== 'idle') {
       lastVoicedDistanceOkRef.current = null;
       return;
     }
@@ -502,7 +502,7 @@ export default function PoseDemo() {
 
   // 시작 자세 hold tracking (idle + ok + isReadyPose 일 때 1.5초 누적 → startSession).
   useEffect(() => {
-    if (mode !== 'squat' || sessionState !== 'idle') {
+    if (mode === 'view' || sessionState !== 'idle') {
       setReadyPoseHoldProgress(0);
       readyPoseStartRef.current = null;
       return;
