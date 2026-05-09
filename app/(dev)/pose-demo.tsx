@@ -44,10 +44,14 @@ type SquatState = 'WAITING' | 'UP' | 'DOWN';
 
 type SessionState = 'idle' | 'countdown' | 'active' | 'complete';
 
-// PRD 5-1: 30초 시간 기반 세션 + 5초 사전 카운트다운.
-const PRE_COUNTDOWN_SEC = 5;
+// PRD 5-1: 30초 시간 기반 세션 + 3초 사전 카운트다운 (T자세 트리거 후).
+const PRE_COUNTDOWN_SEC = 3;
 const ACTIVE_SESSION_SEC = 30;
 const FINAL_COUNTDOWN_VOICE_SEC = 5; // 마지막 N초 음성 카운트다운
+
+// T자세 트리거 — 양 손목 어깨 높이 + 어깨 밖으로 펼침 + 1.5초 유지.
+const T_POSE_HOLD_MS = 1500;
+const T_POSE_Y_TOLERANCE_RATIO = 0.08; // 손목/팔꿈치가 어깨 ±8% (frameH 기준)
 
 // 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
 const SQUAT_MIN_REP_DURATION_MS = 300;
@@ -108,6 +112,12 @@ export default function PoseDemo() {
   useEffect(() => {
     squatCountRef.current = squatCount;
   }, [squatCount]);
+
+  // T자세 hold 진행도 (0~1).
+  const [tPoseHoldProgress, setTPoseHoldProgress] = useState(0);
+  const tPoseStartRef = useRef<number | null>(null);
+  // 음성 안내 중복 방지.
+  const lastVoicedDistanceOkRef = useRef<boolean | null>(null);
 
   const transformLandmark = (
     lm: PoseLandmark,
@@ -234,7 +244,11 @@ export default function PoseDemo() {
       setThresholdY(null);
       setSessionState('idle');
       setRemainingSec(0);
+      setTPoseHoldProgress(0);
+      tPoseStartRef.current = null;
+      lastVoicedDistanceOkRef.current = null;
       downEnteredAtRef.current = 0;
+      speakMessage('거리를 맞추고 양팔을 벌려 티 자세로 대기해주세요');
     } else {
       Speech.stop();
       setSessionState('idle');
@@ -256,7 +270,84 @@ export default function PoseDemo() {
     downEnteredAtRef.current = 0;
     setRemainingSec(PRE_COUNTDOWN_SEC);
     setSessionState('countdown');
+    setTPoseHoldProgress(0);
+    tPoseStartRef.current = null;
   }, []);
+
+  // T자세 감지 — 양 손목/팔꿈치 어깨 높이 + 어깨 밖 펼침.
+  const isTPose = useMemo(() => {
+    if (!pose || !isPersonDetected) return false;
+    const ls = pose.landmarks[11];
+    const rs = pose.landmarks[12];
+    const le = pose.landmarks[13];
+    const re = pose.landmarks[14];
+    const lw = pose.landmarks[15];
+    const rw = pose.landmarks[16];
+    if (!ls || !rs || !le || !re || !lw || !rw) return false;
+    if (
+      lw.inFrameLikelihood < 0.4 ||
+      rw.inFrameLikelihood < 0.4 ||
+      le.inFrameLikelihood < 0.4 ||
+      re.inFrameLikelihood < 0.4
+    ) {
+      return false;
+    }
+    const shoulderY = (ls.y + rs.y) / 2;
+    const yTol = pose.frameHeight * T_POSE_Y_TOLERANCE_RATIO;
+    const wristAtShoulder =
+      Math.abs(lw.y - shoulderY) < yTol &&
+      Math.abs(rw.y - shoulderY) < yTol;
+    const elbowAtShoulder =
+      Math.abs(le.y - shoulderY) < yTol &&
+      Math.abs(re.y - shoulderY) < yTol;
+    // 손목이 어깨 바깥으로 펼침 (좌측 손목 < 좌어깨 x, 우측 손목 > 우어깨 x).
+    const armsExtended = lw.x < ls.x && rw.x > rs.x;
+    return wristAtShoulder && elbowAtShoulder && armsExtended;
+  }, [pose, isPersonDetected]);
+
+  // idle 상태에서 거리 변경 시 음성 안내 (전환 시점에 1번).
+  useEffect(() => {
+    if (mode !== 'squat' || sessionState !== 'idle') {
+      lastVoicedDistanceOkRef.current = null;
+      return;
+    }
+    const isOk = distanceStatus === 'ok';
+    if (lastVoicedDistanceOkRef.current === isOk) return;
+    if (isOk) {
+      speakMessage('양팔을 벌려 티 자세로 대기해주세요');
+    } else if (distanceStatus !== 'no_pose') {
+      speakMessage('거리를 맞춰주세요');
+    }
+    lastVoicedDistanceOkRef.current = isOk;
+  }, [distanceStatus, mode, sessionState]);
+
+  // T자세 hold tracking (idle + ok + isTPose 일 때 1.5초 누적 → startSession).
+  useEffect(() => {
+    if (mode !== 'squat' || sessionState !== 'idle') {
+      setTPoseHoldProgress(0);
+      tPoseStartRef.current = null;
+      return;
+    }
+    if (distanceStatus !== 'ok' || !isTPose) {
+      setTPoseHoldProgress(0);
+      tPoseStartRef.current = null;
+      return;
+    }
+    if (tPoseStartRef.current === null) {
+      tPoseStartRef.current = Date.now();
+    }
+    const interval = setInterval(() => {
+      if (tPoseStartRef.current === null) return;
+      const elapsed = Date.now() - tPoseStartRef.current;
+      const progress = Math.min(elapsed / T_POSE_HOLD_MS, 1);
+      setTPoseHoldProgress(progress);
+      if (progress >= 1) {
+        clearInterval(interval);
+        startSession();
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isTPose, distanceStatus, mode, sessionState, startSession]);
 
   // 1초 tick — countdown / active 동안 매 초 remainingSec 감소.
   useEffect(() => {
@@ -499,18 +590,24 @@ export default function PoseDemo() {
         </View>
       )}
 
-      {/* 시작 버튼 (스쿼트 + idle 일 때만) */}
+      {/* idle 상태 안내 + T자세 hold 진행도 */}
       {mode === 'squat' && sessionState === 'idle' && (
-        <View style={styles.startButtonContainer}>
-          <Pressable
-            onPress={startSession}
-            style={styles.startButton}
-            disabled={distanceStatus !== 'ok'}
-          >
-            <Text style={styles.startButtonText}>
-              {distanceStatus === 'ok' ? '시작' : '거리 맞추고 시작'}
-            </Text>
-          </Pressable>
+        <View style={styles.idleOverlay} pointerEvents="none">
+          <Text style={styles.idleMessage}>
+            {distanceStatus !== 'ok' ? '거리를 맞춰주세요' :
+             !isTPose ? '양팔을 벌려 T 자세로 대기' :
+             '잠시만 유지...'}
+          </Text>
+          {tPoseHoldProgress > 0 && (
+            <View style={styles.holdBarOuter}>
+              <View
+                style={[
+                  styles.holdBarInner,
+                  { width: `${tPoseHoldProgress * 100}%` },
+                ]}
+              />
+            </View>
+          )}
         </View>
       )}
 
@@ -727,28 +824,37 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginTop: 4,
   },
-  // 시작 버튼 (큰)
-  startButtonContainer: {
+  // idle 안내 (T자세 트리거 대기)
+  idleOverlay: {
     position: 'absolute',
-    bottom: 130,
+    top: 0,
+    bottom: 0,
     left: 0,
     right: 0,
+    justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: 24,
   },
-  startButton: {
-    backgroundColor: '#00C853',
-    paddingVertical: 18,
-    paddingHorizontal: 56,
-    borderRadius: 36,
-    shadowColor: '#000',
-    shadowOpacity: 0.3,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 8,
-  },
-  startButtonText: {
+  idleMessage: {
     color: '#fff',
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '800',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.85)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
+    marginBottom: 16,
+  },
+  holdBarOuter: {
+    width: 220,
+    height: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  holdBarInner: {
+    height: '100%',
+    backgroundColor: '#00C853',
   },
   // 사전 카운트다운 (중앙 큰 숫자)
   centerOverlay: {
