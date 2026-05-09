@@ -39,7 +39,27 @@ const CORE_LIKELIHOOD_THRESHOLD = 0.5;
 
 type DistanceStatus = 'no_pose' | 'far' | 'ok' | 'near';
 
-type ExerciseMode = 'view' | 'squat';
+type ExerciseMode = 'view' | 'squat' | 'jumping_jack';
+
+// 운동별 메타: 표시 이름 + 시작 자세 분류 + atTop 의미.
+//   startingAtTop: 시작 자세가 '운동 정점' 이면 true (스쿼트 = 서있음 = 정점).
+//                  점프잭 = 차렷 = 정점 X (= 바닥). startingAtTop=false.
+const EXERCISE_META: Record<Exclude<ExerciseMode, 'view'>, {
+  label: string;
+  startingAtTop: boolean;
+  readyPoseInstruction: string;
+}> = {
+  squat: {
+    label: '스쿼트',
+    startingAtTop: true,
+    readyPoseInstruction: '양손을 모아 대기',
+  },
+  jumping_jack: {
+    label: '점프잭',
+    startingAtTop: false,
+    readyPoseInstruction: '차렷 자세로 대기',
+  },
+};
 
 type SquatState = 'WAITING' | 'UP' | 'DOWN';
 
@@ -61,7 +81,7 @@ const PRAYER_MERGE_DISTANCE_RATIO = 0.12;  // 시각 원 합쳐지는 임계
 //   beat 2: 음성 count (rep 완료) 또는 "아웃"
 const CADENCE_BEAT_MS = 1000;
 
-// 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
+// minRepDuration (가짜 rep 차단). 운동 동일 (실측 후 운동별 분리 가능).
 const SQUAT_MIN_REP_DURATION_MS = 300;
 
 // 임계점 EMA — 서있을 때 천천히 적응 (사용자 카메라 거리 변화 흡수).
@@ -197,6 +217,7 @@ export default function PoseDemo() {
   // 스쿼트 hip / knee y (양쪽 평균).
   const squatGeometry = useMemo(() => {
     if (!pose || !isPersonDetected) return null;
+    if (mode !== 'squat') return null;
     const lh = pose.landmarks[23];
     const rh = pose.landmarks[24];
     const lk = pose.landmarks[25];
@@ -213,7 +234,37 @@ export default function PoseDemo() {
     const hipY = (lh.y + rh.y) / 2;
     const kneeY = (lk.y + rk.y) / 2;
     return { hipY, kneeY };
-  }, [pose, isPersonDetected]);
+  }, [pose, isPersonDetected, mode]);
+
+  // atTop = "운동 정점 자세" 검출.
+  //   스쿼트: hip y < threshold (= 서있음)
+  //   점프잭: 양 손목 모임 + 머리 위 (= 만세 + 박수)
+  const atTop = useMemo<boolean | null>(() => {
+    if (!pose || !isPersonDetected) return null;
+    if (mode === 'squat') {
+      if (!squatGeometry || thresholdY === null) return null;
+      return squatGeometry.hipY < thresholdY;
+    }
+    if (mode === 'jumping_jack') {
+      const lw = pose.landmarks[15];
+      const rw = pose.landmarks[16];
+      const nose = pose.landmarks[0];
+      if (!lw || !rw || !nose) return null;
+      if (
+        lw.inFrameLikelihood < 0.4 ||
+        rw.inFrameLikelihood < 0.4 ||
+        nose.inFrameLikelihood < 0.4
+      ) {
+        return null;
+      }
+      const wristDist = Math.hypot(lw.x - rw.x, lw.y - rw.y);
+      const wristsTogether = wristDist < pose.frameWidth * 0.18;
+      const wristAvgY = (lw.y + rw.y) / 2;
+      const aboveHead = wristAvgY < nose.y;
+      return wristsTogether && aboveHead;
+    }
+    return null;
+  }, [pose, isPersonDetected, mode, squatGeometry, thresholdY]);
 
   // 임계 y 설정 — (hip+knee) / 2 중간점.
   // - WAITING: 즉시 추적 (사용자 자세 변동 그대로 반영, 첫 squat 전이라 lock 불필요)
@@ -232,36 +283,41 @@ export default function PoseDemo() {
     });
   }, [squatGeometry, squatState, mode]);
 
-  // 스쿼트 state machine. 거리 적절 + 세션 active 일 때만 카운트.
+  // 운동 generic state machine. atTop = 정점 (UP), !atTop = 바닥 (DOWN).
+  // 카운트는 startingAtTop 으로 돌아올 때 +1 (= 1 cycle 완성).
+  //   스쿼트: startingAtTop=true (서서 시작) → UP→DOWN→UP 가 1 rep
+  //   점프잭: startingAtTop=false (차렷 시작) → DOWN→UP→DOWN 가 1 rep
   useEffect(() => {
-    if (mode !== 'squat' || !squatGeometry || thresholdY === null) return;
-    if (distanceStatus !== 'ok') return; // 멀거나 가까우면 카운트 X
-    if (sessionState !== 'active') return; // 세션 active 일 때만 카운트
+    if (mode === 'view' || atTop === null) return;
+    if (distanceStatus !== 'ok') return;
+    if (sessionState !== 'active') return;
 
-    // hip y < threshold → 서있음 (UP). hip 이 화면 위쪽 (작은 y) 일수록 서있음.
-    const isAboveThreshold = squatGeometry.hipY < thresholdY;
+    const meta = EXERCISE_META[mode];
+    const startingState: SquatState = meta.startingAtTop ? 'UP' : 'DOWN';
+    const oppositeState: SquatState = meta.startingAtTop ? 'DOWN' : 'UP';
+    const atStarting = meta.startingAtTop ? atTop : !atTop;
     const now = Date.now();
 
     setSquatState((prev) => {
-      if (prev === 'WAITING' && isAboveThreshold) return 'UP';
-      if (prev === 'UP' && !isAboveThreshold) {
+      if (prev === 'WAITING' && atStarting) return startingState;
+      if (prev === startingState && !atStarting) {
         downEnteredAtRef.current = now;
-        return 'DOWN';
+        return oppositeState;
       }
-      if (prev === 'DOWN' && isAboveThreshold) {
+      if (prev === oppositeState && atStarting) {
         const repDurationMs = now - downEnteredAtRef.current;
         if (repDurationMs >= SQUAT_MIN_REP_DURATION_MS) {
           setSquatCount((c) => c + 1);
         }
-        return 'UP';
+        return startingState;
       }
       return prev;
     });
-  }, [squatGeometry, thresholdY, mode, distanceStatus, sessionState]);
+  }, [atTop, mode, distanceStatus, sessionState]);
 
-  // 모드 변경 시 카운트 + threshold + 세션 리셋.
+  // 모드 변경 시 리셋.
   useEffect(() => {
-    if (mode === 'squat') {
+    if (mode !== 'view') {
       setSquatCount(0);
       setSquatState('WAITING');
       setThresholdY(null);
@@ -271,7 +327,8 @@ export default function PoseDemo() {
       readyPoseStartRef.current = null;
       lastVoicedDistanceOkRef.current = null;
       downEnteredAtRef.current = 0;
-      speakMessage('거리를 맞추고 양손을 모아 대기해주세요');
+      const meta = EXERCISE_META[mode];
+      speakMessage(`거리를 맞추고 ${meta.readyPoseInstruction}해주세요`);
     } else {
       Speech.stop();
       setSessionState('idle');
@@ -366,7 +423,8 @@ export default function PoseDemo() {
     const announceOpts = { language: 'ko-KR', pitch: 1.0, rate: 1.0 } as const;
     const numberOpts = { language: 'ko-KR', pitch: 1.2, rate: 1.0 } as const;
 
-    Speech.speak('지금부터 신호에 맞춰 스쿼트를 시작하겠습니다.', {
+    const exerciseLabel = mode !== 'view' ? EXERCISE_META[mode].label : '운동';
+    Speech.speak(`지금부터 신호에 맞춰 ${exerciseLabel}를 시작하겠습니다.`, {
       ...announceOpts,
       onDone: () => {
         setTimeout(() => {
@@ -385,8 +443,9 @@ export default function PoseDemo() {
     });
   }, []);
 
-  // 스쿼트 시작 자세 = 기도손 (양 손목이 모임, 가슴~hip 영역).
-  // 양 손목 거리 + 양 손목 평균 y 위치 검사.
+  // 시작 자세 — 운동별 다름.
+  //   스쿼트: 기도손 (양 손목 모임, 가슴~hip 영역)
+  //   점프잭: 차렷 (양 손목이 어깨 아래 + hip 옆 옆구리)
   const isReadyPose = useMemo(() => {
     if (!pose || !isPersonDetected) return false;
     const ls = pose.landmarks[11];
@@ -401,16 +460,29 @@ export default function PoseDemo() {
     const shoulderY = (ls.y + rs.y) / 2;
     const hipY = (lh.y + rh.y) / 2;
 
-    // 양 손목 거리 (작아야 함 = 손이 모임)
-    const wristDist = Math.hypot(lw.x - rw.x, lw.y - rw.y);
-    const wristsTogether = wristDist < pose.frameWidth * PRAYER_WRIST_DISTANCE_RATIO;
+    if (mode === 'squat') {
+      // 기도손: 양 손목 거리 작음 + 가슴~hip 영역
+      const wristDist = Math.hypot(lw.x - rw.x, lw.y - rw.y);
+      const wristsTogether = wristDist < pose.frameWidth * PRAYER_WRIST_DISTANCE_RATIO;
+      const wristAvgY = (lw.y + rw.y) / 2;
+      const wristsAtChest = wristAvgY > shoulderY && wristAvgY < hipY;
+      return wristsTogether && wristsAtChest;
+    }
 
-    // 손목 평균 y 가 가슴~hip 영역 (어깨 아래, hip 위)
-    const wristAvgY = (lw.y + rw.y) / 2;
-    const wristsAtChest = wristAvgY > shoulderY && wristAvgY < hipY;
+    if (mode === 'jumping_jack') {
+      // 차렷: 양 손목이 어깨 아래 + hip 옆 옆구리
+      const yTol = pose.frameHeight * 0.20;
+      const xTol = pose.frameWidth * 0.18;
+      const wristsLowered = lw.y > shoulderY && rw.y > shoulderY;
+      const lwNearHipY = Math.abs(lw.y - hipY) < yTol;
+      const rwNearHipY = Math.abs(rw.y - hipY) < yTol;
+      const lwNearHipX = Math.abs(lw.x - lh.x) < xTol;
+      const rwNearHipX = Math.abs(rw.x - rh.x) < xTol;
+      return wristsLowered && lwNearHipY && rwNearHipY && lwNearHipX && rwNearHipX;
+    }
 
-    return wristsTogether && wristsAtChest;
-  }, [pose, isPersonDetected]);
+    return false;
+  }, [pose, isPersonDetected, mode]);
 
   // idle 상태에서 거리 변경 시 음성 안내 (전환 시점에 1번).
   useEffect(() => {
@@ -421,7 +493,7 @@ export default function PoseDemo() {
     const isOk = distanceStatus === 'ok';
     if (lastVoicedDistanceOkRef.current === isOk) return;
     if (isOk) {
-      speakMessage('양손을 모아 대기해주세요');
+      speakMessage(mode !== 'view' ? `${EXERCISE_META[mode].readyPoseInstruction}해주세요` : '대기해주세요');
     } else if (distanceStatus !== 'no_pose') {
       speakMessage('거리를 맞춰주세요');
     }
@@ -672,10 +744,10 @@ export default function PoseDemo() {
         </Text>
       </View>
 
-      {/* 스쿼트 카운트 (큰 숫자) + 경과 시간 + 놓침 카운터 */}
-      {mode === 'squat' && (
+      {/* 운동 카운트 (큰 숫자) + 경과 시간 + 놓침 카운터 */}
+      {mode !== 'view' && (
         <View style={styles.squatPanel}>
-          <Text style={styles.squatLabel}>스쿼트</Text>
+          <Text style={styles.squatLabel}>{EXERCISE_META[mode].label}</Text>
           <Text style={styles.squatCount}>{squatCount}</Text>
           {sessionState === 'active' && (
             <Text style={styles.squatTime}>
@@ -706,7 +778,7 @@ export default function PoseDemo() {
       )}
 
       {/* 놓침 경고 배너 (1.5초 자동 hide) */}
-      {mode === 'squat' && sessionState === 'active' && missWarning.visible && (
+      {mode !== 'view' && sessionState === 'active' && missWarning.visible && (
         <View style={styles.missWarningBanner} pointerEvents="none">
           <Text style={styles.missWarningText}>
             {missStreak >= 2 ? '⚠ 마지막 — 다음 놓침 시 종료' : '⚠ 박자에 맞춰주세요'}
@@ -715,7 +787,7 @@ export default function PoseDemo() {
       )}
 
       {/* 인트로 — 음성 안내 중 시각 메시지 */}
-      {mode === 'squat' && sessionState === 'intro' && (
+      {mode !== 'view' && sessionState === 'intro' && (
         <View style={styles.centerOverlay} pointerEvents="none">
           <Text style={styles.introMessage}>준비</Text>
           <Text style={styles.introSubMessage}>곧 시작합니다</Text>
@@ -723,7 +795,7 @@ export default function PoseDemo() {
       )}
 
       {/* 세션 완료 결과 화면 */}
-      {mode === 'squat' && sessionState === 'complete' && (
+      {mode !== 'view' && sessionState === 'complete' && (
         <View style={styles.completeOverlay}>
           <Text style={styles.completeTitle}>
             {endReason === 'out' ? '스탑' : '완료'}
@@ -740,7 +812,7 @@ export default function PoseDemo() {
               setThresholdY(null);
               downEnteredAtRef.current = 0;
               lastVoicedDistanceOkRef.current = null;
-              speakMessage('양손을 모아 대기해주세요');
+              speakMessage(mode !== 'view' ? `${EXERCISE_META[mode].readyPoseInstruction}해주세요` : '대기해주세요');
             }}
           >
             <Text style={styles.completeButtonText}>다시</Text>
@@ -749,11 +821,11 @@ export default function PoseDemo() {
       )}
 
       {/* idle 상태 안내 + 시작 자세 hold 진행도 */}
-      {mode === 'squat' && sessionState === 'idle' && (
+      {mode !== 'view' && sessionState === 'idle' && (
         <View style={styles.idleOverlay} pointerEvents="none">
           <Text style={styles.idleMessage}>
             {distanceStatus !== 'ok' ? '거리를 맞춰주세요' :
-             !isReadyPose ? '양손을 모아 대기' :
+             !isReadyPose ? EXERCISE_META[mode].readyPoseInstruction :
              '잠시만 유지...'}
           </Text>
           {readyPoseHoldProgress > 0 && (
@@ -798,6 +870,19 @@ export default function PoseDemo() {
                   ]}
                 >
                   스쿼트
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setMode('jumping_jack')}
+                style={[styles.modeButton, mode === 'jumping_jack' && styles.modeButtonActive]}
+              >
+                <Text
+                  style={[
+                    styles.modeButtonText,
+                    mode === 'jumping_jack' && styles.modeButtonTextActive,
+                  ]}
+                >
+                  점프잭
                 </Text>
               </Pressable>
             </View>
