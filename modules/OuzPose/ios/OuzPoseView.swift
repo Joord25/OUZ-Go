@@ -4,10 +4,9 @@ import MLKitPoseDetection
 import MLKitVision
 
 // Phase 0b: 카메라 + ML Kit BlazePose 33pt 실시간 검출.
-// 검증 후 Phase 0c-e: Skia 스켈레톤 / state machine / 음성 추가.
+// cameraPosition prop ("front" / "back") 으로 카메라 전환.
 
 class OuzPoseView: ExpoView, AVCaptureVideoDataOutputSampleBufferDelegate {
-  // JS 로 33 landmarks 전달.
   let onPose = EventDispatcher()
 
   private let captureSession = AVCaptureSession()
@@ -15,8 +14,9 @@ class OuzPoseView: ExpoView, AVCaptureVideoDataOutputSampleBufferDelegate {
   private let videoOutput = AVCaptureVideoDataOutput()
   private let videoQueue = DispatchQueue(label: "ouzpose.video", qos: .userInitiated)
   private let poseDetector: PoseDetector
+  private var currentPosition: AVCaptureDevice.Position = .back
 
-  // 33 landmark 순서 (BlazePose). JS 측이 이 인덱스 순서대로 받음.
+  // 33 landmark 순서 (BlazePose).
   private static let landmarkOrder: [PoseLandmarkType] = [
     .nose,
     .leftEyeInner, .leftEye, .leftEyeOuter,
@@ -26,8 +26,8 @@ class OuzPoseView: ExpoView, AVCaptureVideoDataOutputSampleBufferDelegate {
     .leftShoulder, .rightShoulder,
     .leftElbow, .rightElbow,
     .leftWrist, .rightWrist,
-    .leftPinky, .rightPinky,
-    .leftIndex, .rightIndex,
+    .leftPinkyFinger, .rightPinkyFinger,
+    .leftIndexFinger, .rightIndexFinger,
     .leftThumb, .rightThumb,
     .leftHip, .rightHip,
     .leftKnee, .rightKnee,
@@ -42,22 +42,7 @@ class OuzPoseView: ExpoView, AVCaptureVideoDataOutputSampleBufferDelegate {
     self.poseDetector = PoseDetector.poseDetector(options: options)
     super.init(appContext: appContext)
     clipsToBounds = true
-    setupCamera()
-  }
-
-  private func setupCamera() {
     captureSession.sessionPreset = .hd1280x720
-
-    // 측면/정면 운동에 따라 prop 으로 받을 예정. 지금은 back default.
-    let position: AVCaptureDevice.Position = .back
-    guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
-          let input = try? AVCaptureDeviceInput(device: camera),
-          captureSession.canAddInput(input)
-    else {
-      print("[OuzPose] 카메라 초기화 실패")
-      return
-    }
-    captureSession.addInput(input)
 
     videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
     videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
@@ -70,9 +55,33 @@ class OuzPoseView: ExpoView, AVCaptureVideoDataOutputSampleBufferDelegate {
     previewLayer.videoGravity = .resizeAspectFill
     layer.addSublayer(previewLayer)
 
+    configureInput(position: currentPosition)
     DispatchQueue.global(qos: .userInitiated).async {
       self.captureSession.startRunning()
     }
+  }
+
+  // JS prop "cameraPosition" 변경 시 호출.
+  func setCameraPosition(_ position: String) {
+    let newPosition: AVCaptureDevice.Position = (position == "front") ? .front : .back
+    if newPosition == currentPosition { return }
+    currentPosition = newPosition
+    DispatchQueue.global(qos: .userInitiated).async {
+      self.configureInput(position: newPosition)
+    }
+  }
+
+  private func configureInput(position: AVCaptureDevice.Position) {
+    captureSession.beginConfiguration()
+    captureSession.inputs.forEach { captureSession.removeInput($0) }
+    if let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+       let input = try? AVCaptureDeviceInput(device: camera),
+       captureSession.canAddInput(input) {
+      captureSession.addInput(input)
+    } else {
+      print("[OuzPose] 카메라 (\(position == .front ? "front" : "back")) 초기화 실패")
+    }
+    captureSession.commitConfiguration()
   }
 
   override func layoutSubviews() {
@@ -84,16 +93,15 @@ class OuzPoseView: ExpoView, AVCaptureVideoDataOutputSampleBufferDelegate {
 
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
     let visionImage = VisionImage(buffer: sampleBuffer)
-    visionImage.orientation = .right  // back camera + portrait
+    // 전면/후면 카메라 별 회전 보정.
+    visionImage.orientation = (currentPosition == .front) ? .leftMirrored : .right
 
-    // Stream mode 라 sync 호출 OK (ML Kit 가 내부 큐 관리).
     poseDetector.process(visionImage) { [weak self] poses, error in
       guard let self = self,
             error == nil,
             let pose = poses?.first
       else { return }
 
-      // Frame 차원 (landmark x,y 의 pixel 좌표계 기준).
       let frameDims = CMSampleBufferGetImageBuffer(sampleBuffer).map { pixelBuffer -> (Int, Int) in
         return (CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer))
       } ?? (0, 0)

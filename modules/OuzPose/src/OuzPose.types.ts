@@ -46,7 +46,11 @@ export type PoseDetectionEvent = {
   frameHeight: number;
 };
 
+export type CameraPosition = 'front' | 'back';
+
 export type OuzPoseViewProps = {
   style?: StyleProp<ViewStyle>;
+  /** 카메라 방향. 기본 'back'. 운동별 가이드에 따라 'front' 사용. */
+  cameraPosition?: CameraPosition;
   onPose?: (event: { nativeEvent: PoseDetectionEvent }) => void;
 };

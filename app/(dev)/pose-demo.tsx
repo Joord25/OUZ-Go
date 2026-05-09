@@ -1,8 +1,9 @@
 import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
 import { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { OuzPoseView } from '../../modules/OuzPose';
 import type {
+  CameraPosition,
   PoseDetectionEvent,
   PoseLandmark,
 } from '../../modules/OuzPose/src/OuzPose.types';
@@ -36,6 +37,7 @@ const CONNECTIONS: [number, number][] = [
 export default function PoseDemo() {
   const [pose, setPose] = useState<PoseDetectionEvent | null>(null);
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
+  const [cameraPosition, setCameraPosition] = useState<CameraPosition>('back');
 
   // Native frame 좌표를 화면 좌표로 변환.
   // landmark x,y 는 frameWidth × frameHeight 기준 픽셀.
@@ -69,6 +71,7 @@ export default function PoseDemo() {
     >
       <OuzPoseView
         style={StyleSheet.absoluteFill}
+        cameraPosition={cameraPosition}
         onPose={(e) => setPose(e.nativeEvent)}
       />
 
@@ -124,6 +127,19 @@ export default function PoseDemo() {
           </Text>
         )}
       </View>
+
+      <View style={styles.controlsBar}>
+        <Pressable
+          onPress={() =>
+            setCameraPosition((p) => (p === 'back' ? 'front' : 'back'))
+          }
+          style={styles.toggleButton}
+        >
+          <Text style={styles.toggleButtonText}>
+            {cameraPosition === 'back' ? '전면 카메라' : '후면 카메라'} 로 전환
+          </Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -152,5 +168,23 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     marginVertical: 2,
+  },
+  controlsBar: {
+    position: 'absolute',
+    bottom: 40,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  toggleButton: {
+    backgroundColor: 'rgba(255, 165, 0, 0.9)',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 24,
+  },
+  toggleButtonText: {
+    color: '#000',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
