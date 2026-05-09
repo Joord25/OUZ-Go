@@ -41,3 +41,8 @@ app-example
 # generated native folders
 /ios
 /android
+
+# native module gradle cache
+modules/*/android/.gradle/
+modules/*/android/build/
+modules/*/ios/build/
