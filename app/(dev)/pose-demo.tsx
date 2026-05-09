@@ -42,20 +42,31 @@ type ExerciseMode = 'view' | 'squat';
 
 type SquatState = 'WAITING' | 'UP' | 'DOWN';
 
-type SessionState = 'idle' | 'countdown' | 'active' | 'complete';
+type SessionState = 'idle' | 'intro' | 'active' | 'complete';
 
-// PRD 5-1: 30초 시간 기반 세션 + 3초 사전 카운트다운 (T자세 트리거 후).
-const PRE_COUNTDOWN_SEC = 3;
+// 30초 active 시간 (PRD 5-1).
 const ACTIVE_SESSION_SEC = 30;
-const FINAL_COUNTDOWN_VOICE_SEC = 5; // 마지막 N초 음성 카운트다운
+const FINAL_COUNTDOWN_VOICE_SEC = 5;
 
 // T자세 트리거 — 양 손목 어깨 높이 + 어깨 밖으로 펼침 + 1.5초 유지.
 const T_POSE_HOLD_MS = 1500;
-const T_POSE_Y_TOLERANCE_RATIO = 0.08; // 손목/팔꿈치가 어깨 ±8% (frameH 기준)
+const T_POSE_Y_TOLERANCE_RATIO = 0.08;
 
-// UDT 체력평가 신호음 간격 = 1.5초.
-// Cycle (1 rep) = 2 비트 = 3초.
-const CADENCE_BEAT_MS = 1500;
+// 메트로놈 비트 간격 (1초). cycle = 3 비트 = 3초/rep.
+//   beat 0: 비프 (내려감)
+//   beat 1: 비프 (올라옴)
+//   beat 2: 음성 count (rep 완료) 또는 "아웃"
+const CADENCE_BEAT_MS = 1000;
+
+// 비프 음성 (Speech 로 짧고 높은 톤).
+function speakBeep() {
+  Speech.stop();
+  Speech.speak('삑', {
+    language: 'ko-KR',
+    pitch: 1.5,
+    rate: 1.6,
+  });
+}
 
 // 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
 const SQUAT_MIN_REP_DURATION_MS = 300;
@@ -254,40 +265,40 @@ export default function PoseDemo() {
     }
   }, [mode]);
 
-  // 메트로놈 cadence (UDT 1.5초 간격 신호음 패턴).
-  // 음성이 페이스 LEAD — 사용자는 따라옴.
-  // Cycle = 2 비트 (3초/rep):
-  //   Beat 1: "하나" (내려감 cue)
-  //   Beat 2: "둘 [N번째]" (올라옴 + count) — 그 cycle 안에 rep 했으면.
-  //                       못했으면 "아웃" + 세션 종료.
+  // 메트로놈 cadence (3-비트 cycle, 1초 간격, 3초/rep).
+  // 음성이 페이스 LEAD — 사용자는 비프 + count 신호를 따라옴.
+  // Cycle:
+  //   Beat 0 (down): 삑 (비프)  ← 사용자 내려감 (1초)
+  //   Beat 1 (up):   삑 (비프)  ← 사용자 올라옴 (1초)
+  //   Beat 2 (count): "[N번째]" 음성 — rep 했으면, 못했으면 "아웃"
   useEffect(() => {
     if (mode !== 'squat' || sessionState !== 'active') return;
 
-    let beat: 'down' | 'up' = 'up'; // 첫 tick 에서 'down' 으로 만들어 "하나" 발화
+    let beat: 'down' | 'up' | 'count' = 'down';
     let cycleStartCount = squatCountRef.current;
     let expectedRepNum = 1;
 
-    // 첫 비트: "하나" 즉시 발화 (사용자가 내려가기 시작).
-    Speech.stop();
-    Speech.speak('하나', { language: 'ko-KR', pitch: 1.1, rate: 1.2 });
+    // 첫 비트 즉시: 삑 (down)
+    speakBeep();
     beat = 'up';
 
     const interval = setInterval(() => {
       if (beat === 'up') {
-        // Beat 2: 그 cycle 안에 rep 했나 검사.
+        speakBeep();
+        beat = 'count';
+      } else if (beat === 'count') {
         const didRep = squatCountRef.current > cycleStartCount;
         if (didRep) {
           Speech.stop();
-          Speech.speak(`둘 ${koreanCountWord(expectedRepNum)}`, {
+          Speech.speak(koreanCountWord(expectedRepNum), {
             language: 'ko-KR',
-            pitch: 1.1,
-            rate: 1.2,
+            pitch: 1.2,
+            rate: 1.1,
           });
           expectedRepNum += 1;
           cycleStartCount = squatCountRef.current;
           beat = 'down';
         } else {
-          // 아웃: 카운트 못 따라옴.
           Speech.stop();
           Speech.speak('아웃', {
             language: 'ko-KR',
@@ -299,8 +310,7 @@ export default function PoseDemo() {
           clearInterval(interval);
         }
       } else if (beat === 'down') {
-        Speech.stop();
-        Speech.speak('하나', { language: 'ko-KR', pitch: 1.1, rate: 1.2 });
+        speakBeep();
         beat = 'up';
       }
     }, CADENCE_BEAT_MS);
@@ -308,18 +318,32 @@ export default function PoseDemo() {
     return () => clearInterval(interval);
   }, [mode, sessionState]);
 
-  // 세션 시작 (idle → countdown → active → complete).
+  // 세션 시작 (idle → intro → active → complete).
   const startSession = useCallback(() => {
     Speech.stop();
     setSquatCount(0);
     setSquatState('WAITING');
-    setThresholdY(null); // 새 세션마다 임계 리셋 → countdown 동안 다시 캘리브레이션
+    setThresholdY(null);
     downEnteredAtRef.current = 0;
-    setRemainingSec(PRE_COUNTDOWN_SEC);
-    setSessionState('countdown');
+    setRemainingSec(0);
+    setSessionState('intro');
     setEndReason(null);
     setTPoseHoldProgress(0);
     tPoseStartRef.current = null;
+
+    // 인트로 음성 → 끝나면 active 진입 (첫 비프 발사).
+    Speech.speak(
+      '지금부터 신호에 맞춰 운동을 시작하겠습니다. 셋, 둘, 하나.',
+      {
+        language: 'ko-KR',
+        pitch: 1.0,
+        rate: 1.0,
+        onDone: () => {
+          setSessionState('active');
+          setRemainingSec(ACTIVE_SESSION_SEC);
+        },
+      },
+    );
   }, []);
 
   // T자세 감지 — 양 손목/팔꿈치 어깨 높이 + 어깨 밖 펼침.
@@ -397,50 +421,29 @@ export default function PoseDemo() {
     return () => clearInterval(interval);
   }, [isTPose, distanceStatus, mode, sessionState, startSession]);
 
-  // 1초 tick — countdown / active 동안 매 초 remainingSec 감소.
+  // active 1초 tick — 매 초 remainingSec 감소.
   useEffect(() => {
-    if (sessionState !== 'countdown' && sessionState !== 'active') return;
+    if (sessionState !== 'active') return;
     const interval = setInterval(() => {
       setRemainingSec((prev) => Math.max(prev - 1, 0));
     }, 1000);
     return () => clearInterval(interval);
   }, [sessionState]);
 
-  // remainingSec 변화에 따른 음성 + 상태 전환.
+  // active 종료 + 마지막 5초 음성.
   useEffect(() => {
-    if (sessionState === 'countdown') {
-      if (remainingSec === 0) {
-        speakMessage('시작');
-        setRemainingSec(ACTIVE_SESSION_SEC);
-        setSessionState('active');
-      } else {
-        // 5,4,3,2,1
-        Speech.stop();
-        Speech.speak(String(remainingSec), {
-          language: 'ko-KR',
-          pitch: 1.2,
-          rate: 1.2,
-        });
-      }
-    } else if (sessionState === 'active') {
-      if (remainingSec === 0) {
-        Speech.stop();
-        Speech.speak(`30초 동안 ${squatCountRef.current}개 했어요`, {
-          language: 'ko-KR',
-          pitch: 1.0,
-          rate: 1.0,
-        });
-        setEndReason('time');
-        setSessionState('complete');
-      } else if (remainingSec <= FINAL_COUNTDOWN_VOICE_SEC && remainingSec > 0) {
-        Speech.stop();
-        Speech.speak(String(remainingSec), {
-          language: 'ko-KR',
-          pitch: 1.3,
-          rate: 1.2,
-        });
-      }
+    if (sessionState !== 'active') return;
+    if (remainingSec === 0) {
+      Speech.stop();
+      Speech.speak(`30초 동안 ${squatCountRef.current}개 했어요`, {
+        language: 'ko-KR',
+        pitch: 1.0,
+        rate: 1.0,
+      });
+      setEndReason('time');
+      setSessionState('complete');
     }
+    // 마지막 5초 음성은 메트로놈 비프와 겹치므로 생략 (시각만 유지)
   }, [remainingSec, sessionState]);
 
 
@@ -609,8 +612,8 @@ export default function PoseDemo() {
               (distanceStatus !== 'ok' || sessionState !== 'active') && styles.squatStateGated,
             ]}
           >
-            {sessionState === 'idle' ? '시작 버튼 누르기' :
-             sessionState === 'countdown' ? '준비 중...' :
+            {sessionState === 'idle' ? 'T자세 대기' :
+             sessionState === 'intro' ? '시작 안내 중...' :
              sessionState === 'complete' ? '완료!' :
              distanceStatus !== 'ok' ? '거리 조정 필요 ⚠' :
              squatState === 'WAITING' ? '시작 자세 대기' :
@@ -620,11 +623,11 @@ export default function PoseDemo() {
         </View>
       )}
 
-      {/* 사전 카운트다운 (큰 중앙 숫자) */}
-      {mode === 'squat' && sessionState === 'countdown' && remainingSec > 0 && (
+      {/* 인트로 — 음성 안내 중 시각 메시지 */}
+      {mode === 'squat' && sessionState === 'intro' && (
         <View style={styles.centerOverlay} pointerEvents="none">
-          <Text style={styles.bigCountdown}>{remainingSec}</Text>
-          <Text style={styles.bigCountdownLabel}>준비</Text>
+          <Text style={styles.introMessage}>준비</Text>
+          <Text style={styles.introSubMessage}>곧 시작합니다</Text>
         </View>
       )}
 
@@ -676,7 +679,7 @@ export default function PoseDemo() {
       )}
 
       <View style={styles.controlsBar}>
-        {/* 운동 모드 토글 + 카메라 (countdown/active 중에는 숨김) */}
+        {/* 운동 모드 토글 + 카메라 (intro/active 중에는 숨김) */}
         {(sessionState === 'idle' || sessionState === 'complete') && (
           <>
             <View style={styles.modeRow}>
@@ -943,6 +946,20 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '700',
     marginTop: -20,
+  },
+  introMessage: {
+    color: '#fff',
+    fontSize: 80,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0, 0, 0, 0.85)',
+    textShadowOffset: { width: 0, height: 3 },
+    textShadowRadius: 10,
+  },
+  introSubMessage: {
+    color: '#FFA500',
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 8,
   },
   // 완료 결과 화면
   completeOverlay: {
