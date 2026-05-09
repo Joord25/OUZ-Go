@@ -38,6 +38,14 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "OUZ-Go가 운동 자세를 분석하기 위해 카메라 사용을 요청합니다.",
+          "enableMicrophonePermission": false,
+          "enableCodeScanner": false
+        }
       ]
     ],
     "experiments": {
