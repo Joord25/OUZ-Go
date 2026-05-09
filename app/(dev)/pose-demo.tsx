@@ -53,6 +53,9 @@ const FINAL_COUNTDOWN_VOICE_SEC = 5; // 마지막 N초 음성 카운트다운
 const T_POSE_HOLD_MS = 1500;
 const T_POSE_Y_TOLERANCE_RATIO = 0.08; // 손목/팔꿈치가 어깨 ±8% (frameH 기준)
 
+// 카운트 사이 최대 허용 간격 (이 시간 내 다음 rep 없으면 "중단").
+const REP_GAP_TIMEOUT_MS = 4000;
+
 // 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
 const SQUAT_MIN_REP_DURATION_MS = 300;
 
@@ -73,12 +76,13 @@ function speakCount(n: number) {
   const word = n >= 1 && n <= KOREAN_COUNT_NAMES.length
     ? KOREAN_COUNT_NAMES[n - 1]
     : String(n);
-  // 이전 음성 중단 후 새로 발화 — 빠른 카운트도 동기화 유지.
+  // 한국식 운동 카운트 cadence: "하나 둘 [N번째]"
+  // 예: 1번째 = "하나 둘 하나", 2번째 = "하나 둘 둘", ...
   Speech.stop();
-  Speech.speak(word, {
+  Speech.speak(`하나 둘 ${word}`, {
     language: 'ko-KR',
     pitch: 1.1,
-    rate: 1.15,
+    rate: 1.2,
   });
 }
 
@@ -107,6 +111,8 @@ export default function PoseDemo() {
   // 세션 (시간 기반).
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [remainingSec, setRemainingSec] = useState(0);
+  const [endReason, setEndReason] = useState<'time' | 'gap' | null>(null);
+  const lastRepTimeRef = useRef<number>(0);
   // 음성 announce 시 stale closure 회피용.
   const squatCountRef = useRef(0);
   useEffect(() => {
@@ -270,8 +276,10 @@ export default function PoseDemo() {
     downEnteredAtRef.current = 0;
     setRemainingSec(PRE_COUNTDOWN_SEC);
     setSessionState('countdown');
+    setEndReason(null);
     setTPoseHoldProgress(0);
     tPoseStartRef.current = null;
+    lastRepTimeRef.current = 0;
   }, []);
 
   // T자세 감지 — 양 손목/팔꿈치 어깨 높이 + 어깨 밖 펼침.
@@ -382,6 +390,7 @@ export default function PoseDemo() {
           pitch: 1.0,
           rate: 1.0,
         });
+        setEndReason('time');
         setSessionState('complete');
       } else if (remainingSec <= FINAL_COUNTDOWN_VOICE_SEC && remainingSec > 0) {
         Speech.stop();
@@ -393,6 +402,37 @@ export default function PoseDemo() {
       }
     }
   }, [remainingSec, sessionState]);
+
+  // active 진입 시 lastRepTime 초기화.
+  useEffect(() => {
+    if (sessionState === 'active') {
+      lastRepTimeRef.current = Date.now();
+    }
+  }, [sessionState]);
+
+  // 새 rep 카운트 시 lastRepTime 갱신.
+  useEffect(() => {
+    if (sessionState !== 'active' || squatCount === 0) return;
+    lastRepTimeRef.current = Date.now();
+  }, [squatCount, sessionState]);
+
+  // Rep gap 타임아웃 감시 — 4초 이상 rep 없으면 "중단".
+  useEffect(() => {
+    if (sessionState !== 'active') return;
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - lastRepTimeRef.current;
+      if (elapsed > REP_GAP_TIMEOUT_MS) {
+        Speech.stop();
+        Speech.speak(
+          `중단됐어요. ${squatCountRef.current}개 했어요`,
+          { language: 'ko-KR', pitch: 1.0, rate: 1.0 },
+        );
+        setEndReason('gap');
+        setSessionState('complete');
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, [sessionState]);
 
   const distanceStatus: DistanceStatus =
     smoothedRatio === null ? 'no_pose' :
@@ -581,11 +621,22 @@ export default function PoseDemo() {
       {/* 세션 완료 결과 화면 */}
       {mode === 'squat' && sessionState === 'complete' && (
         <View style={styles.completeOverlay}>
-          <Text style={styles.completeTitle}>30초 완료</Text>
+          <Text style={styles.completeTitle}>
+            {endReason === 'gap' ? '중단됨' : '30초 완료'}
+          </Text>
           <Text style={styles.completeCount}>{squatCount}</Text>
           <Text style={styles.completeUnit}>개</Text>
-          <Pressable style={styles.completeButton} onPress={startSession}>
-            <Text style={styles.completeButtonText}>다시 시작</Text>
+          <Pressable
+            style={styles.completeButton}
+            onPress={() => {
+              setSessionState('idle');
+              setEndReason(null);
+              setSquatCount(0);
+              lastVoicedDistanceOkRef.current = null;
+              speakMessage('양팔을 벌려 티 자세로 대기해주세요');
+            }}
+          >
+            <Text style={styles.completeButtonText}>다시</Text>
           </Pressable>
         </View>
       )}
