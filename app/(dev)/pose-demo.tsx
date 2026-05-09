@@ -53,8 +53,9 @@ const FINAL_COUNTDOWN_VOICE_SEC = 5; // 마지막 N초 음성 카운트다운
 const T_POSE_HOLD_MS = 1500;
 const T_POSE_Y_TOLERANCE_RATIO = 0.08; // 손목/팔꿈치가 어깨 ±8% (frameH 기준)
 
-// 카운트 사이 최대 허용 간격 (이 시간 내 다음 rep 없으면 "중단").
-const REP_GAP_TIMEOUT_MS = 4000;
+// UDT 체력평가 신호음 간격 = 1.5초.
+// Cycle (1 rep) = 2 비트 = 3초.
+const CADENCE_BEAT_MS = 1500;
 
 // 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
 const SQUAT_MIN_REP_DURATION_MS = 300;
@@ -76,24 +77,6 @@ function koreanCountWord(n: number): string {
   return n >= 1 && n <= KOREAN_COUNT_NAMES.length
     ? KOREAN_COUNT_NAMES[n - 1]
     : String(n);
-}
-
-function speakOne() {
-  Speech.stop();
-  Speech.speak('하나', {
-    language: 'ko-KR',
-    pitch: 1.1,
-    rate: 1.2,
-  });
-}
-
-function speakTwoWithCount(n: number) {
-  Speech.stop();
-  Speech.speak(`둘 ${koreanCountWord(n)}`, {
-    language: 'ko-KR',
-    pitch: 1.1,
-    rate: 1.2,
-  });
 }
 
 function speakMessage(text: string) {
@@ -121,8 +104,7 @@ export default function PoseDemo() {
   // 세션 (시간 기반).
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [remainingSec, setRemainingSec] = useState(0);
-  const [endReason, setEndReason] = useState<'time' | 'gap' | null>(null);
-  const lastRepTimeRef = useRef<number>(0);
+  const [endReason, setEndReason] = useState<'time' | 'out' | null>(null);
   // 음성 announce 시 stale closure 회피용.
   const squatCountRef = useRef(0);
   useEffect(() => {
@@ -271,37 +253,59 @@ export default function PoseDemo() {
     }
   }, [mode]);
 
-  // 카운트 cadence: UP→DOWN "하나", DOWN→UP "둘 [N]" (state 전환 기반).
-  const prevSquatStateRef = useRef<SquatState>('WAITING');
-  const prevSquatCountRef = useRef<number>(0);
+  // 메트로놈 cadence (UDT 1.5초 간격 신호음 패턴).
+  // 음성이 페이스 LEAD — 사용자는 따라옴.
+  // Cycle = 2 비트 (3초/rep):
+  //   Beat 1: "하나" (내려감 cue)
+  //   Beat 2: "둘 [N번째]" (올라옴 + count) — 그 cycle 안에 rep 했으면.
+  //                       못했으면 "아웃" + 세션 종료.
   useEffect(() => {
-    if (mode !== 'squat' || sessionState !== 'active') {
-      prevSquatStateRef.current = squatState;
-      prevSquatCountRef.current = squatCount;
-      return;
-    }
-    const prevState = prevSquatStateRef.current;
-    const prevCount = prevSquatCountRef.current;
+    if (mode !== 'squat' || sessionState !== 'active') return;
 
-    if (prevState === 'UP' && squatState === 'DOWN') {
-      speakOne();
-    } else if (prevState === 'DOWN' && squatState === 'UP') {
-      // rep 카운트 됐으면 "둘 [N]", 아니면 그냥 "둘".
-      if (squatCount > prevCount) {
-        speakTwoWithCount(squatCount);
-      } else {
+    let beat: 'down' | 'up' = 'up'; // 첫 tick 에서 'down' 으로 만들어 "하나" 발화
+    let cycleStartCount = squatCountRef.current;
+    let expectedRepNum = 1;
+
+    // 첫 비트: "하나" 즉시 발화 (사용자가 내려가기 시작).
+    Speech.stop();
+    Speech.speak('하나', { language: 'ko-KR', pitch: 1.1, rate: 1.2 });
+    beat = 'up';
+
+    const interval = setInterval(() => {
+      if (beat === 'up') {
+        // Beat 2: 그 cycle 안에 rep 했나 검사.
+        const didRep = squatCountRef.current > cycleStartCount;
+        if (didRep) {
+          Speech.stop();
+          Speech.speak(`둘 ${koreanCountWord(expectedRepNum)}`, {
+            language: 'ko-KR',
+            pitch: 1.1,
+            rate: 1.2,
+          });
+          expectedRepNum += 1;
+          cycleStartCount = squatCountRef.current;
+          beat = 'down';
+        } else {
+          // 아웃: 카운트 못 따라옴.
+          Speech.stop();
+          Speech.speak('아웃', {
+            language: 'ko-KR',
+            pitch: 1.0,
+            rate: 1.0,
+          });
+          setEndReason('out');
+          setSessionState('complete');
+          clearInterval(interval);
+        }
+      } else if (beat === 'down') {
         Speech.stop();
-        Speech.speak('둘', {
-          language: 'ko-KR',
-          pitch: 1.1,
-          rate: 1.2,
-        });
+        Speech.speak('하나', { language: 'ko-KR', pitch: 1.1, rate: 1.2 });
+        beat = 'up';
       }
-    }
+    }, CADENCE_BEAT_MS);
 
-    prevSquatStateRef.current = squatState;
-    prevSquatCountRef.current = squatCount;
-  }, [squatState, squatCount, mode, sessionState]);
+    return () => clearInterval(interval);
+  }, [mode, sessionState]);
 
   // 세션 시작 (idle → countdown → active → complete).
   const startSession = useCallback(() => {
@@ -314,7 +318,6 @@ export default function PoseDemo() {
     setEndReason(null);
     setTPoseHoldProgress(0);
     tPoseStartRef.current = null;
-    lastRepTimeRef.current = 0;
   }, []);
 
   // T자세 감지 — 양 손목/팔꿈치 어깨 높이 + 어깨 밖 펼침.
@@ -438,36 +441,6 @@ export default function PoseDemo() {
     }
   }, [remainingSec, sessionState]);
 
-  // active 진입 시 lastRepTime 초기화.
-  useEffect(() => {
-    if (sessionState === 'active') {
-      lastRepTimeRef.current = Date.now();
-    }
-  }, [sessionState]);
-
-  // 새 rep 카운트 시 lastRepTime 갱신.
-  useEffect(() => {
-    if (sessionState !== 'active' || squatCount === 0) return;
-    lastRepTimeRef.current = Date.now();
-  }, [squatCount, sessionState]);
-
-  // Rep gap 타임아웃 감시 — 4초 이상 rep 없으면 "중단".
-  useEffect(() => {
-    if (sessionState !== 'active') return;
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - lastRepTimeRef.current;
-      if (elapsed > REP_GAP_TIMEOUT_MS) {
-        Speech.stop();
-        Speech.speak(
-          `중단됐어요. ${squatCountRef.current}개 했어요`,
-          { language: 'ko-KR', pitch: 1.0, rate: 1.0 },
-        );
-        setEndReason('gap');
-        setSessionState('complete');
-      }
-    }, 500);
-    return () => clearInterval(interval);
-  }, [sessionState]);
 
   const distanceStatus: DistanceStatus =
     smoothedRatio === null ? 'no_pose' :
@@ -657,7 +630,7 @@ export default function PoseDemo() {
       {mode === 'squat' && sessionState === 'complete' && (
         <View style={styles.completeOverlay}>
           <Text style={styles.completeTitle}>
-            {endReason === 'gap' ? '중단됨' : '30초 완료'}
+            {endReason === 'out' ? '아웃' : '30초 완료'}
           </Text>
           <Text style={styles.completeCount}>{squatCount}</Text>
           <Text style={styles.completeUnit}>개</Text>
