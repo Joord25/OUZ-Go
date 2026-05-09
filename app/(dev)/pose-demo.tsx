@@ -48,9 +48,12 @@ type SessionState = 'idle' | 'intro' | 'active' | 'complete';
 // 신호음에서 연속 탈락 한도. 이 횟수 이상 → 스탑.
 const MAX_CONSECUTIVE_MISSES = 3;
 
-// T자세 트리거 — 양 손목 어깨 높이 + 어깨 밖으로 펼침 + 1.5초 유지.
-const T_POSE_HOLD_MS = 1500;
-const T_POSE_Y_TOLERANCE_RATIO = 0.08;
+// 시작 자세 = 운동별 다름 (현재 스쿼트만 = 기도손, 양손 모음).
+// 양 손목 거리 < frameW * 임계 + 가슴~hip 영역 + 1.5초 유지.
+const READY_POSE_HOLD_MS = 1500;
+const PRAYER_WRIST_DISTANCE_RATIO = 0.10; // 양 손목 거리 < 10% frameW
+const PRAYER_HAND_HALO_RADIUS = 32;        // 손목 시각 원 반경 (px)
+const PRAYER_MERGE_DISTANCE_RATIO = 0.12;  // 시각 원 합쳐지는 임계
 
 // 메트로놈 비트 간격 (1초). cycle = 3 비트 = 3초/rep.
 //   beat 0: 비프 (내려감)
@@ -64,20 +67,25 @@ const SQUAT_MIN_REP_DURATION_MS = 300;
 // 임계점 EMA — 서있을 때 천천히 적응 (사용자 카메라 거리 변화 흡수).
 const THRESHOLD_EMA_ALPHA = 0.05;
 
-// 한국어 자연수 (PRD 5-1 "하나, 둘, 셋..." 음성 가이드).
-const KOREAN_COUNT_NAMES = [
-  '하나', '둘', '셋', '넷', '다섯',
-  '여섯', '일곱', '여덟', '아홉', '열',
-  '열하나', '열둘', '열셋', '열넷', '열다섯',
-  '열여섯', '열일곱', '열여덟', '열아홉', '스물',
-  '스물하나', '스물둘', '스물셋', '스물넷', '스물다섯',
-  '스물여섯', '스물일곱', '스물여덟', '스물아홉', '서른',
-];
+// 한국어 자연수 (1~99). 100+ 는 자릿수 그대로 ("백" 어색).
+const KOREAN_TENS = ['', '열', '스물', '서른', '마흔', '쉰', '예순', '일흔', '여든', '아흔'];
+const KOREAN_ONES = ['', '하나', '둘', '셋', '넷', '다섯', '여섯', '일곱', '여덟', '아홉'];
+
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
 
 function koreanCountWord(n: number): string {
-  return n >= 1 && n <= KOREAN_COUNT_NAMES.length
-    ? KOREAN_COUNT_NAMES[n - 1]
-    : String(n);
+  if (!Number.isInteger(n) || n < 1) return String(n);
+  if (n >= 100) return String(n); // 100+ 자릿수 ("백 일" 어색)
+  const tens = Math.floor(n / 10);
+  const ones = n % 10;
+  if (tens === 0) return KOREAN_ONES[ones];
+  if (ones === 0) return KOREAN_TENS[tens];
+  return `${KOREAN_TENS[tens]}${KOREAN_ONES[ones]}`;
 }
 
 function speakMessage(text: string) {
@@ -123,9 +131,13 @@ export default function PoseDemo() {
     squatCountRef.current = squatCount;
   }, [squatCount]);
 
-  // T자세 hold 진행도 (0~1).
-  const [tPoseHoldProgress, setTPoseHoldProgress] = useState(0);
-  const tPoseStartRef = useRef<number | null>(null);
+  // 시작 자세 hold 진행도 (0~1, 운동별 다름 — 스쿼트 = 기도손).
+  const [readyPoseHoldProgress, setReadyPoseHoldProgress] = useState(0);
+  const readyPoseStartRef = useRef<number | null>(null);
+
+  // 총 경과 시간 (active 동안).
+  const [activeElapsedMs, setActiveElapsedMs] = useState(0);
+  const activeStartTimeRef = useRef<number | null>(null);
   // 음성 안내 중복 방지.
   const lastVoicedDistanceOkRef = useRef<boolean | null>(null);
 
@@ -255,11 +267,11 @@ export default function PoseDemo() {
       setThresholdY(null);
       setSessionState('idle');
       setMissStreak(0);
-      setTPoseHoldProgress(0);
-      tPoseStartRef.current = null;
+      setReadyPoseHoldProgress(0);
+      readyPoseStartRef.current = null;
       lastVoicedDistanceOkRef.current = null;
       downEnteredAtRef.current = 0;
-      speakMessage('거리를 맞추고 양팔을 벌려 티 자세로 대기해주세요');
+      speakMessage('거리를 맞추고 양손을 모아 대기해주세요');
     } else {
       Speech.stop();
       setSessionState('idle');
@@ -315,7 +327,18 @@ export default function PoseDemo() {
             setSessionState('complete');
             clearInterval(interval);
           } else {
-            // 1, 2번째 놓침: 음성 안내 X (cadence 방해 방지) → 시각 배너만.
+            // 1번째: "박자에 맞춰주세요"
+            // 2번째: "한 번 더 놓치면 종료됩니다"
+            // 시각 배너 + 음성 (count 자리 1초 동안 발화 → 다음 비프와 약간 overlap 가능)
+            const message = missStreakLocal === 1
+              ? '박자에 맞춰주세요'
+              : '한 번 더 놓치면 종료됩니다';
+            Speech.stop();
+            Speech.speak(message, {
+              language: 'ko-KR',
+              pitch: 1.1,
+              rate: 1.3,
+            });
             setMissWarning((prev) => ({ visible: true, key: prev.key + 1 }));
             cycleStartCount = squatCountRef.current;
             beat = 'down';
@@ -341,13 +364,13 @@ export default function PoseDemo() {
     setSessionState('intro');
     setEndReason(null);
     setMissStreak(0);
-    setTPoseHoldProgress(0);
-    tPoseStartRef.current = null;
+    setReadyPoseHoldProgress(0);
+    readyPoseStartRef.current = null;
 
     const announceOpts = { language: 'ko-KR', pitch: 1.0, rate: 1.0 } as const;
     const numberOpts = { language: 'ko-KR', pitch: 1.2, rate: 1.0 } as const;
 
-    Speech.speak('지금부터 신호에 맞춰 운동을 시작하겠습니다.', {
+    Speech.speak('지금부터 신호에 맞춰 스쿼트를 시작하겠습니다.', {
       ...announceOpts,
       onDone: () => {
         setTimeout(() => {
@@ -366,35 +389,31 @@ export default function PoseDemo() {
     });
   }, []);
 
-  // T자세 감지 — 양 손목/팔꿈치 어깨 높이 + 어깨 밖 펼침.
-  const isTPose = useMemo(() => {
+  // 스쿼트 시작 자세 = 기도손 (양 손목이 모임, 가슴~hip 영역).
+  // 양 손목 거리 + 양 손목 평균 y 위치 검사.
+  const isReadyPose = useMemo(() => {
     if (!pose || !isPersonDetected) return false;
     const ls = pose.landmarks[11];
     const rs = pose.landmarks[12];
-    const le = pose.landmarks[13];
-    const re = pose.landmarks[14];
+    const lh = pose.landmarks[23];
+    const rh = pose.landmarks[24];
     const lw = pose.landmarks[15];
     const rw = pose.landmarks[16];
-    if (!ls || !rs || !le || !re || !lw || !rw) return false;
-    if (
-      lw.inFrameLikelihood < 0.4 ||
-      rw.inFrameLikelihood < 0.4 ||
-      le.inFrameLikelihood < 0.4 ||
-      re.inFrameLikelihood < 0.4
-    ) {
-      return false;
-    }
+    if (!ls || !rs || !lh || !rh || !lw || !rw) return false;
+    if (lw.inFrameLikelihood < 0.4 || rw.inFrameLikelihood < 0.4) return false;
+
     const shoulderY = (ls.y + rs.y) / 2;
-    const yTol = pose.frameHeight * T_POSE_Y_TOLERANCE_RATIO;
-    const wristAtShoulder =
-      Math.abs(lw.y - shoulderY) < yTol &&
-      Math.abs(rw.y - shoulderY) < yTol;
-    const elbowAtShoulder =
-      Math.abs(le.y - shoulderY) < yTol &&
-      Math.abs(re.y - shoulderY) < yTol;
-    // 손목이 어깨 바깥으로 펼침 (좌측 손목 < 좌어깨 x, 우측 손목 > 우어깨 x).
-    const armsExtended = lw.x < ls.x && rw.x > rs.x;
-    return wristAtShoulder && elbowAtShoulder && armsExtended;
+    const hipY = (lh.y + rh.y) / 2;
+
+    // 양 손목 거리 (작아야 함 = 손이 모임)
+    const wristDist = Math.hypot(lw.x - rw.x, lw.y - rw.y);
+    const wristsTogether = wristDist < pose.frameWidth * PRAYER_WRIST_DISTANCE_RATIO;
+
+    // 손목 평균 y 가 가슴~hip 영역 (어깨 아래, hip 위)
+    const wristAvgY = (lw.y + rw.y) / 2;
+    const wristsAtChest = wristAvgY > shoulderY && wristAvgY < hipY;
+
+    return wristsTogether && wristsAtChest;
   }, [pose, isPersonDetected]);
 
   // idle 상태에서 거리 변경 시 음성 안내 (전환 시점에 1번).
@@ -406,42 +425,58 @@ export default function PoseDemo() {
     const isOk = distanceStatus === 'ok';
     if (lastVoicedDistanceOkRef.current === isOk) return;
     if (isOk) {
-      speakMessage('양팔을 벌려 티 자세로 대기해주세요');
+      speakMessage('양손을 모아 대기해주세요');
     } else if (distanceStatus !== 'no_pose') {
       speakMessage('거리를 맞춰주세요');
     }
     lastVoicedDistanceOkRef.current = isOk;
   }, [distanceStatus, mode, sessionState]);
 
-  // T자세 hold tracking (idle + ok + isTPose 일 때 1.5초 누적 → startSession).
+  // 시작 자세 hold tracking (idle + ok + isReadyPose 일 때 1.5초 누적 → startSession).
   useEffect(() => {
     if (mode !== 'squat' || sessionState !== 'idle') {
-      setTPoseHoldProgress(0);
-      tPoseStartRef.current = null;
+      setReadyPoseHoldProgress(0);
+      readyPoseStartRef.current = null;
       return;
     }
-    if (distanceStatus !== 'ok' || !isTPose) {
-      setTPoseHoldProgress(0);
-      tPoseStartRef.current = null;
+    if (distanceStatus !== 'ok' || !isReadyPose) {
+      setReadyPoseHoldProgress(0);
+      readyPoseStartRef.current = null;
       return;
     }
-    if (tPoseStartRef.current === null) {
-      tPoseStartRef.current = Date.now();
+    if (readyPoseStartRef.current === null) {
+      readyPoseStartRef.current = Date.now();
     }
     const interval = setInterval(() => {
-      if (tPoseStartRef.current === null) return;
-      const elapsed = Date.now() - tPoseStartRef.current;
-      const progress = Math.min(elapsed / T_POSE_HOLD_MS, 1);
-      setTPoseHoldProgress(progress);
+      if (readyPoseStartRef.current === null) return;
+      const elapsed = Date.now() - readyPoseStartRef.current;
+      const progress = Math.min(elapsed / READY_POSE_HOLD_MS, 1);
+      setReadyPoseHoldProgress(progress);
       if (progress >= 1) {
         clearInterval(interval);
         startSession();
       }
     }, 100);
     return () => clearInterval(interval);
-  }, [isTPose, distanceStatus, mode, sessionState, startSession]);
+  }, [isReadyPose, distanceStatus, mode, sessionState, startSession]);
 
   // 30초 시간 제한 제거 — 신호음에 맞춰 무한 (3연속 탈락까지 진행).
+
+  // 총 경과 시간 (active 동안). 100ms 마다 업데이트.
+  useEffect(() => {
+    if (sessionState !== 'active') {
+      activeStartTimeRef.current = null;
+      return;
+    }
+    activeStartTimeRef.current = Date.now();
+    setActiveElapsedMs(0);
+    const interval = setInterval(() => {
+      if (activeStartTimeRef.current) {
+        setActiveElapsedMs(Date.now() - activeStartTimeRef.current);
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [sessionState]);
 
   // 놓침 경고 배너 자동 hide (1.5초).
   useEffect(() => {
@@ -535,6 +570,46 @@ export default function PoseDemo() {
               />
             );
           })()}
+          {/* 시작 자세 시각 — 양 손목에 원 (스쿼트 idle 상태에서만) */}
+          {mode === 'squat' && sessionState === 'idle' && distanceStatus === 'ok' && (() => {
+            const lw = pose.landmarks[15];
+            const rw = pose.landmarks[16];
+            if (!lw || !rw) return null;
+            if (lw.inFrameLikelihood < 0.3 || rw.inFrameLikelihood < 0.3) return null;
+            const lp = transformLandmark(lw, pose.frameWidth, pose.frameHeight);
+            const rp = transformLandmark(rw, pose.frameWidth, pose.frameHeight);
+            const merged = isReadyPose;
+            const color = merged ? '#FFD700' : '#FFA500';
+            const opacity = merged ? 0.85 : 0.55;
+            return (
+              <>
+                <Circle
+                  key="prayer-l"
+                  cx={lp.x}
+                  cy={lp.y}
+                  r={PRAYER_HAND_HALO_RADIUS}
+                  color={color}
+                  opacity={opacity}
+                />
+                <Circle
+                  key="prayer-r"
+                  cx={rp.x}
+                  cy={rp.y}
+                  r={PRAYER_HAND_HALO_RADIUS}
+                  color={color}
+                  opacity={opacity}
+                />
+                <Line
+                  key="prayer-link"
+                  p1={vec(lp.x, lp.y)}
+                  p2={vec(rp.x, rp.y)}
+                  color={color}
+                  strokeWidth={merged ? 4 : 2}
+                  opacity={opacity}
+                />
+              </>
+            );
+          })()}
           {/* hip 위치 표시 원 (MissionFit 스타일) */}
           {mode === 'squat' && squatGeometry && (() => {
             const hipScreen = transformLandmark(
@@ -601,11 +676,16 @@ export default function PoseDemo() {
         </Text>
       </View>
 
-      {/* 스쿼트 카운트 (큰 숫자) + 놓침 카운터 */}
+      {/* 스쿼트 카운트 (큰 숫자) + 경과 시간 + 놓침 카운터 */}
       {mode === 'squat' && (
         <View style={styles.squatPanel}>
           <Text style={styles.squatLabel}>스쿼트</Text>
           <Text style={styles.squatCount}>{squatCount}</Text>
+          {sessionState === 'active' && (
+            <Text style={styles.squatTime}>
+              {formatElapsed(activeElapsedMs)}
+            </Text>
+          )}
           {sessionState === 'active' && missStreak > 0 && (
             <Text style={styles.squatMiss}>
               놓침 {missStreak} / {MAX_CONSECUTIVE_MISSES}
@@ -618,7 +698,7 @@ export default function PoseDemo() {
               (distanceStatus !== 'ok' || sessionState !== 'active') && styles.squatStateGated,
             ]}
           >
-            {sessionState === 'idle' ? 'T자세 대기' :
+            {sessionState === 'idle' ? '양손 모음 대기' :
              sessionState === 'intro' ? '시작 안내 중...' :
              sessionState === 'complete' ? '완료!' :
              distanceStatus !== 'ok' ? '거리 조정 필요 ⚠' :
@@ -662,7 +742,7 @@ export default function PoseDemo() {
               setThresholdY(null);
               downEnteredAtRef.current = 0;
               lastVoicedDistanceOkRef.current = null;
-              speakMessage('양팔을 벌려 티 자세로 대기해주세요');
+              speakMessage('양손을 모아 대기해주세요');
             }}
           >
             <Text style={styles.completeButtonText}>다시</Text>
@@ -670,20 +750,20 @@ export default function PoseDemo() {
         </View>
       )}
 
-      {/* idle 상태 안내 + T자세 hold 진행도 */}
+      {/* idle 상태 안내 + 시작 자세 hold 진행도 */}
       {mode === 'squat' && sessionState === 'idle' && (
         <View style={styles.idleOverlay} pointerEvents="none">
           <Text style={styles.idleMessage}>
             {distanceStatus !== 'ok' ? '거리를 맞춰주세요' :
-             !isTPose ? '양팔을 벌려 T 자세로 대기' :
+             !isReadyPose ? '양손을 모아 대기' :
              '잠시만 유지...'}
           </Text>
-          {tPoseHoldProgress > 0 && (
+          {readyPoseHoldProgress > 0 && (
             <View style={styles.holdBarOuter}>
               <View
                 style={[
                   styles.holdBarInner,
-                  { width: `${tPoseHoldProgress * 100}%` },
+                  { width: `${readyPoseHoldProgress * 100}%` },
                 ]}
               />
             </View>
@@ -898,6 +978,13 @@ const styles = StyleSheet.create({
   squatStateGated: {
     color: '#FF6464',
   },
+  squatTime: {
+    color: '#FFA500',
+    fontSize: 22,
+    fontWeight: '800',
+    marginTop: 4,
+    letterSpacing: 1,
+  },
   squatMiss: {
     color: '#FF6464',
     fontSize: 14,
@@ -920,7 +1007,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
   },
-  // idle 안내 (T자세 트리거 대기)
+  // idle 안내 (시작 자세 트리거 대기)
   idleOverlay: {
     position: 'absolute',
     top: 0,
