@@ -41,8 +41,11 @@ type ExerciseMode = 'view' | 'squat';
 
 type SquatState = 'WAITING' | 'UP' | 'DOWN';
 
-// 스쿼트 minRepDuration (PRD 부록 A).
-const SQUAT_MIN_REP_DURATION_MS = 800;
+// 스쿼트 minRepDuration (PRD 부록 A는 800ms 가설, 실측 후 단축).
+const SQUAT_MIN_REP_DURATION_MS = 300;
+
+// 임계점 EMA — 서있을 때 천천히 적응 (사용자 카메라 거리 변화 흡수).
+const THRESHOLD_EMA_ALPHA = 0.05;
 
 export default function PoseDemo() {
   const [pose, setPose] = useState<PoseDetectionEvent | null>(null);
@@ -54,6 +57,7 @@ export default function PoseDemo() {
   // 스쿼트 state machine (ref 로 관리해서 closure stale 회피).
   const [squatCount, setSquatCount] = useState(0);
   const [squatState, setSquatState] = useState<SquatState>('WAITING');
+  const [thresholdY, setThresholdY] = useState<number | null>(null);
   const downEnteredAtRef = useRef<number>(0);
 
   const transformLandmark = (
@@ -130,21 +134,37 @@ export default function PoseDemo() {
     return { hipY, kneeY };
   }, [pose, isPersonDetected]);
 
-  // 스쿼트 state machine.
+  // 임계 y 설정 — (hip+knee) / 2 중간점.
+  // - 처음 인식 시: 즉시 설정
+  // - UP 상태: EMA 로 천천히 적응 (사용자 거리 변화 흡수)
+  // - DOWN 상태: 잠금 (squat 중에 임계가 따라 내려가지 않게)
   useEffect(() => {
     if (mode !== 'squat' || !squatGeometry) return;
+    setThresholdY((prev) => {
+      const currentMid = (squatGeometry.hipY + squatGeometry.kneeY) / 2;
+      if (prev === null) return currentMid; // 첫 frame
+      if (squatState === 'UP') {
+        return THRESHOLD_EMA_ALPHA * currentMid + (1 - THRESHOLD_EMA_ALPHA) * prev;
+      }
+      return prev; // DOWN / WAITING 중에는 잠금
+    });
+  }, [squatGeometry, squatState, mode]);
 
-    // hip y < knee y → 서있음 (UP). 화면 좌표는 위가 0 이라 hip 이 위쪽 = 작은 y.
-    const isStanding = squatGeometry.hipY < squatGeometry.kneeY;
+  // 스쿼트 state machine.
+  useEffect(() => {
+    if (mode !== 'squat' || !squatGeometry || thresholdY === null) return;
+
+    // hip y < threshold → 서있음 (UP). hip 이 화면 위쪽 (작은 y) 일수록 서있음.
+    const isAboveThreshold = squatGeometry.hipY < thresholdY;
     const now = Date.now();
 
     setSquatState((prev) => {
-      if (prev === 'WAITING' && isStanding) return 'UP';
-      if (prev === 'UP' && !isStanding) {
+      if (prev === 'WAITING' && isAboveThreshold) return 'UP';
+      if (prev === 'UP' && !isAboveThreshold) {
         downEnteredAtRef.current = now;
         return 'DOWN';
       }
-      if (prev === 'DOWN' && isStanding) {
+      if (prev === 'DOWN' && isAboveThreshold) {
         const repDurationMs = now - downEnteredAtRef.current;
         if (repDurationMs >= SQUAT_MIN_REP_DURATION_MS) {
           setSquatCount((c) => c + 1);
@@ -153,13 +173,14 @@ export default function PoseDemo() {
       }
       return prev;
     });
-  }, [squatGeometry, mode]);
+  }, [squatGeometry, thresholdY, mode]);
 
-  // 모드 변경 시 카운트 리셋.
+  // 모드 변경 시 카운트 + threshold 리셋.
   useEffect(() => {
     if (mode === 'squat') {
       setSquatCount(0);
       setSquatState('WAITING');
+      setThresholdY(null);
       downEnteredAtRef.current = 0;
     }
   }, [mode]);
@@ -229,20 +250,38 @@ export default function PoseDemo() {
               />
             );
           })}
-          {/* 스쿼트 모드: 무릎 임계 가로선 */}
-          {mode === 'squat' && squatGeometry && (() => {
-            const kneeScreen = transformLandmark(
-              { x: 0, y: squatGeometry.kneeY, z: 0, inFrameLikelihood: 1 },
+          {/* 스쿼트 모드: hip-knee 중간점 임계 가로선 */}
+          {mode === 'squat' && thresholdY !== null && (() => {
+            const screen = transformLandmark(
+              { x: 0, y: thresholdY, z: 0, inFrameLikelihood: 1 },
               pose.frameWidth,
               pose.frameHeight,
             );
             return (
               <Line
                 key="squat-threshold"
-                p1={vec(0, kneeScreen.y)}
-                p2={vec(viewSize.width, kneeScreen.y)}
+                p1={vec(0, screen.y)}
+                p2={vec(viewSize.width, screen.y)}
                 color={squatState === 'DOWN' ? '#00FF88' : '#FFA500'}
                 strokeWidth={3}
+              />
+            );
+          })()}
+          {/* hip 위치 표시 원 (MissionFit 스타일) */}
+          {mode === 'squat' && squatGeometry && (() => {
+            const hipScreen = transformLandmark(
+              { x: (pose.landmarks[23].x + pose.landmarks[24].x) / 2, y: squatGeometry.hipY, z: 0, inFrameLikelihood: 1 },
+              pose.frameWidth,
+              pose.frameHeight,
+            );
+            return (
+              <Circle
+                key="squat-hip-indicator"
+                cx={hipScreen.x}
+                cy={hipScreen.y}
+                r={20}
+                color={squatState === 'DOWN' ? '#00FF88' : '#FFA500'}
+                opacity={0.7}
               />
             );
           })()}
