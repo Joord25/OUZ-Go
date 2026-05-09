@@ -27,7 +27,7 @@ const CONNECTIONS: [number, number][] = [
 
 // 거리 비율 임계값.
 const DIST_FAR_THRESHOLD = 0.4;   // 미만 = 멀다
-const DIST_NEAR_THRESHOLD = 0.7;  // 초과 = 가깝다 (좁힘 — 너무 가까운 거 더 잘 잡음)
+const DIST_NEAR_THRESHOLD = 0.6;  // 초과 = 가깝다
 
 type DistanceStatus = 'no_pose' | 'far' | 'ok' | 'near';
 
